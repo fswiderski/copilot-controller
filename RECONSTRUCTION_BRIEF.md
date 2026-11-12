@@ -80,15 +80,20 @@ Commit the toolchain selection and lockfile, and support:
 |---|---|---|---|
 | Pure engine, encoders, decoders, JSON/SVG previews | Yes | Yes | Yes |
 | Native observations | Platform-specific, with explicit limitations | Platform-specific, with explicit limitations | Platform-specific, with explicit limitations |
-| Micro and AKP03 HID metadata/probes | Optional feature | Optional feature | Unavailable, even when feature selected |
+| Micro and AKP03 HID metadata/probes | Optional worker-only metadata; live probes fail closed on missing exact evidence | Optional feature | Unavailable, even when feature selected |
 | CT serial probe | Native implementation | Unavailable | Unavailable |
 | Micro firmware update | Unavailable | Optional feature, ARM64 only | Unavailable |
 | Safe persistent state and cooperative owner | Fixed local disk | Local APFS | Local ext-family, XFS, Btrfs |
 
 Use three optional Cargo features: `akp03-hid`, `micro-hid`, and
-`micro-firmware`; the last implies `micro-hid`. All offline behavior remains
-available without them. Building a feature does not imply a connected device,
-permissions, qualification, enrollment, or terminal-action readiness.
+`micro-firmware`. They are independent: `micro-firmware` enables offline
+pinned-artifact validation, not HID metadata or probing; select `micro-hid`
+separately for those capabilities. This keeps local artifact validation from
+implicitly enabling a native device backend. Pure engine, codec, and preview
+behavior remains available without these features. Native firmware execution
+remains unavailable. Building a feature does not imply a connected device,
+permissions, qualification, enrollment, or terminal-action readiness; native
+probes still require explicit opt-in, worker containment, and exact evidence.
 
 ## 3. Observable command interface
 
@@ -131,6 +136,46 @@ capability surfaces, not evidence that either is action-ready.
 fail. It includes `schema: 1`, `read_only: true`, `command_ready: false`, and
 `qualification: "foundation_only"`. Probe success means the bounded experiment
 completed, not that physical input, visible output, or host control is qualified.
+
+The integration package currently routes offline inventories, synthetic previews,
+bounded recorded assignments, decoders, and pinned local firmware-plan validation.
+`doctor` samples the native clock and available read-only process/desktop
+observations; serial/device discovery is deliberately unavailable. Contained
+health workers run on Windows/macOS ARM64. Explicit `ct-probe`, `micro-probe`, and
+`akp03-probe` routes reuse the same-executable bounded Windows diagnostic
+supervisor, with static kind-only HID authority and validated options/results.
+Micro/AKP03 `--health-check` uses pure no-I/O reports on other platforms and
+requires no HID feature. Live HID probing requires the device-specific feature
+and native descriptor evidence. Windows exposes optional BusTypeGuid metadata
+through a bounded native parent walk across exact logical HID bus nodes
+(only a documented USB bus GUID is classified; missing/unknown transport stops
+the walk). Incomplete enumeration or unresolved matching candidates fail closed.
+Exact interface numbers and original report descriptors remain unavailable, so live probes
+fail closed. Windows HID access requires a private, scoped contained-child
+capability; there is no in-process fallback. See platform appendix §2.5 for
+the supported API contract and residual evidence gaps.
+Micro/AKP03 also use the macOS ARM64 bounded process-group worker,
+with the exact hidden routes, framing and device-spec budgets. All IOKit access
+and writes require a private, scoped child capability and same-executable parent;
+ordinary public in-process native access fails closed. Health constructs no HID
+backend. macOS native evidence remains unverified on hardware, and process groups
+use a child-side parent-lifetime watchdog, not a kernel-enforced parent-death or
+escape guarantee; whole-process suspension and OS/driver stalls remain outside
+its guarantee. CT stays Windows-only; Linux live
+probing remains unavailable. See platform appendix §8.7 for cleanup/fencing.
+State snapshots/recovery and shared
+authority-anchor ownership are explicit library-only APIs; no CLI route invokes
+them. No native updater is wired. No probe is action-ready or physically
+qualified; cross-compilation and synthetic tests are not hardware acceptance.
+HID results are budgeted after native cleanup. Oversize exports fail explicitly
+with omission/truncation metadata, keeping whole semantic values or whole report
+prefixes, native write counts and cleanup flags. The unchanged bounded worker
+frame has a correlated compact encoding-failure fallback; it no longer silently
+loses oversized callback responses after possible writes.
+Windows namespace mutations remain explicitly unavailable. Compiled codecs and
+test-only maintenance models are not runtime or physical acceptance.
+Native persistence acceptance tests require an explicitly approved filesystem
+and are ignored by default; Unix CI executes them on its approved roots.
 
 ## 4. Common types and time rules
 
@@ -590,6 +635,17 @@ State storage is library-only. There is no public CLI for production migration,
 initialization, mutation, or recovery. A caller supplies an existing approved
 absolute local root; no implicit home-directory or temp-directory default.
 
+The Rust API is `persistence::state_store::StateStore`: callers explicitly
+initialize, load, or transact with an expected store revision. Recovery is
+never automatic; callers inspect `plan_recovery(expected_revision)` and pass
+the returned artifact token with an explicit `KeepCurrent` or
+`CompletePrepared` decision to `recover`. The token binds the decision to the
+pending/replacement file identities and bytes observed while holding the lock.
+The separate `persistence::ownership::RuntimeOwnerLease` takes a
+caller-selected authority root, independent of each configuration root, and
+locks its existing empty `runtime-owner.lock` anchor without writing owner data
+or taking over a held lock.
+
 Files:
 
 - `core-state.json`: committed snapshot.
@@ -676,6 +732,21 @@ reparse points, pipes, or hardlinked files.
 
 Windows:
 
+- Implementation limitation: the current private-root boundary supports
+  read-only access and locking an existing anchor, **not durable mutations**,
+  even on fixed local disks. `check_mutation_support`, exclusive creation,
+  creation of a missing lock anchor, publication, and recovery discard fail
+  closed with `UnsupportedPlatform` /
+  `windows_directory_durability_unavailable` before changing the namespace.
+  The unsupported guarantee is crash/power-loss persistence of directory-entry
+  creation, replacement, and removal, including evidence cleanup. Flushing a
+  file handle alone does not establish that guarantee; successful directory
+  `FlushFileBuffers` is not a documented substitute, `ReplaceFileW` has no
+  supported write-through flag, and initial write-through move alone does not
+  cover the complete protocol. Volume-wide flushing requires privileges and
+  is not implemented. Do not claim Windows persistence acceptance (including
+  S03 publication/old-reader acceptance) until a supported complete strategy
+  is implemented and tested natively.
 - Only absolute drive-letter paths on fixed local disks.
 - Pin every ancestor using directory handles without delete sharing; refuse
   reparse ancestors. Do not claim network/removable semantics.
@@ -713,6 +784,13 @@ Unix:
 
 Read-only event tails need not have private file permissions or use one of the
 state filesystems, but still reject unsafe links/types and unsafe path walking.
+The native tail boundary exposes handle-derived last-write and change timestamps
+as an opaque equality token alongside file identity and length. Pollers retain
+this token to reset at a changed EOF. Reads reject same-size timestamp changes
+during a read or since the last successful read/open, while ordinary appends
+remain permitted. Reopen after a source-change error and reset reducer state.
+These timestamps are not a content digest or an unforgeable generation: native
+timestamp precision and update behavior still apply.
 This boundary is not a sandbox against malicious code running as the same user.
 Crash-injection tests are not physical power-loss qualification.
 
@@ -1153,10 +1231,10 @@ temporary directory.
 
 ```sh
 cargo test --locked --all-targets
-cargo test --locked --all-targets --features akp03-hid,micro-firmware
+cargo test --locked --all-targets --features akp03-hid,micro-hid,micro-firmware
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets --features akp03-hid,micro-firmware -- -D warnings
-cargo build --locked --release --features akp03-hid,micro-firmware
+cargo clippy --locked --all-targets --features akp03-hid,micro-hid,micro-firmware -- -D warnings
+cargo build --locked --release --features akp03-hid,micro-hid,micro-firmware
 cargo check --locked --all-targets --target aarch64-pc-windows-msvc
 ```
 

@@ -667,6 +667,46 @@ fields and accept no arbitrary port, command, file, label or persistent setting.
 Invalid options produce no I/O. Deadlines use injected monotonic elapsed time;
 clock regression fails. Cancellation is a one-way shared flag.
 
+### Explicit CLI integration
+
+`ct-probe` accepts only `--schema-version`, `--total-timeout-ms`,
+`--io-timeout-ms`, `--capture-ms`, `--max-events`, and
+`--max-received-bytes`, each followed by an unsigned ASCII decimal value, plus
+the valueless `--test-pattern` opt-in flag. Defaults and cross-field bounds are
+the table above. Unknown, repeated, missing-value and invalid options fail before
+worker launch; arbitrary ports, commands, paths and selectors are not accepted.
+Neither `doctor` nor inventory invokes this route.
+
+The coordinator and hidden worker share a compiled static diagnostic allowlist
+containing `health`, `ct_serial_probe`, `micro_hid_probe`, and
+`akp03_hid_probe`; the health coordinator retains health-only authority.
+CT's callback validates the object payload before
+calling `devices::ct::probe::run_native`; only the contained disposable Windows
+worker owns native serial handles, overlapped storage and the mutex. The callback
+also checks detached, one-process kill-on-close Job containment using the existing
+health diagnostic before native access, refusing a direct uncontained hidden
+worker invocation even with valid options. Both sides
+validate typed reports/failures, fixed privacy-safe strings, qualification and
+request-specific bounds. Framed JSON rejects duplicate keys before conversion
+to a generic value. No vendor executable, dependency or device code is used.
+
+Supervision allows `total_timeout_ms + 500 + min(io_timeout_ms,250) + 500
++ 1000` milliseconds: the session, terminal cancellation grace, separate close,
+its possible terminal grace, and a bounded startup/response/exit allowance.
+This is at most 10250 ms, not an unlimited native-driver wait. Existing worker
+failure cleanup can additionally wait up to 5 seconds for exit and 1 second for
+I/O joining; unresolved cleanup retains its existing fail-closed fence.
+
+A successful CLI report has `command_ready: false` and a typed `ct_probe` report.
+Native failures travel inside the worker's correlated transport payload as
+`status: probe_error` and become nonzero CLI failures, not successful empty
+reports. Worker failures (including non-Windows `unsupported_platform`) have
+`status: worker_error`. Errors go only to stderr; no success JSON is printed.
+Options failures have `status: probe_error`, kind `invalid_options`, stage
+`options` and no progress. The private `__probe-worker` route never falls through
+to ordinary command execution. Windows cross-compilation does not verify real
+worker containment, driver cancellation or physical hardware acceptance.
+
 ### Windows selection and serial setup
 
 Native diagnostics require a disposable contained helper. Other OSes fail as
@@ -1116,7 +1156,10 @@ capture+15,000 ms, health-check timeout 3,000 ms. Kill/reap stuck child. This is
 liveness containment, not a terminal-action security sandbox.
 
 Outcome: `probe_succeeded`, `command_ready=false`, `read_only=!initialize`,
-progress report, optional textual error. Reject unknown outcome fields.
+progress report, optional textual error, and required `response_limit` (null
+normally). A nonnull response-limit record has `omitted_fields`, nonnegative
+`captures_dropped`/`inputs_dropped`, and boolean `serialization_failed`. Reject
+unknown/missing outcome and limit-record fields.
 Supervisor rejects command-ready true or more than 128 captures; it does not
 independently validate every progress field.
 
@@ -1128,6 +1171,72 @@ error text. Treat it as sensitive diagnostic data rather than public telemetry.
 A zero-duration passive native probe still enumerates, opens/rechecks identity
 and verifies descriptor, but reads/writes no reports. Missing feature/platform
 fails native probing; health check works without either.
+
+### Explicit CLI integration and current platform limits
+
+`akp03-probe` accepts only `--capture-ms` followed by unsigned ASCII decimal
+`0..30000` (default `2000`) and valueless `--initialize`, `--test-pattern`, and
+`--health-check` flags. Unknown, repeated, missing or malformed options, test
+without initialize, and health/write conflicts fail before worker launch.
+
+The named private `__akp03-worker` route reuses the same-executable
+bounded-stdio service (Windows Job or macOS ARM64 process group).
+It receives a complete framed options object under kind `akp03_hid_probe`,
+rather than unframed command-line options. Its static allowlist authorizes only
+AKP03; no health, CT, Micro, arbitrary command, path or selector is admitted.
+The shared `__probe-worker` diagnostic registry also recognizes the AKP03
+callback. Both routes stay hidden from help and reject extra arguments.
+Duplicate frame keys and unknown/missing typed option/result fields fail
+closed. Live callbacks require detached, one-process kill-on-close Windows Job
+containment or the macOS private process-group worker capability before backend
+construction. Only the child can enumerate/open HID.
+The outcome also includes `hardware_qualified=false`; neither readiness nor
+qualification can be asserted by a worker. Read-only must equal `!initialize`,
+and at most 128 captures are admitted, without independently validating every
+progress field. Failed reports go to stderr with nonzero CLI status.
+
+Health uses no backend/transport and requires no feature. Where there is no
+Windows/macOS ARM64 supervisor, only this pure no-I/O report runs in-process; live access
+has no fallback. Native probes require `akp03-hid`. Windows can read optional
+exact BusTypeGuid metadata through a bounded native parent walk across logical
+HID buses (missing/unknown transport stops the walk; only the documented USB
+bus GUID is classified). Incomplete scans or unresolved matching candidates
+fail closed, not false-unique.
+The required native interface number/raw descriptor remain unavailable,
+so it fails closed before transport open/reports. The raw-descriptor IOCTL
+is HID minidriver traffic, not a supported user-mode collection request.
+Windows HID access requires a private scoped contained-child capability and
+post-open identity/bus revalidation; see platform appendix §2.5.
+macOS ARM64 now supports the exact route through the bounded
+process-group child. All IOKit access, including synchronous output, requires
+the private scoped capability and same-executable parent; public in-process
+native access fails closed. Native properties/exact descriptors remain required
+and unverified on hardware. A 50 ms independent child parent-lifetime watchdog
+can terminate a blocked main thread on parent death, but does not provide
+kernel-enforced parent-death/escape containment or overcome process suspension/
+OS-driver stalls. See platform appendix §8.7.
+Windows failure cleanup may additionally wait up to five seconds for exit and
+one for I/O joining; macOS group cleanup allows two seconds per attempt (Drop
+may retry once) and closes pipes
+synchronously. Unconfirmed cleanup fences replacement.
+
+Result budgeting occurs only after native acquisition/output finishes. Compact
+payloads are limited to 65280 bytes, leaving 256 bytes inside the unchanged
+65536-byte frame for envelope/identity. Oversize results become explicit failures
+with `response_limit`, never EOF or silent success. Rebuild with another 1024
+bytes reserved for limit metadata and retain a prefix of complete captures;
+never clip raw hex or decoded records. Set `capture_truncated`, record the exact
+`captures_dropped` count, and keep initialization/output/pattern accounting.
+Native primary errors up to 4096 bytes remain, followed by the response-limit
+error; oversized text is explicitly listed as omitted. If needed, a compact
+typed failure omits candidate/phase/error text with metadata while retaining all
+numeric progress and initialized flags. `inputs_dropped` is always zero for
+AKP03. A response-limit record cannot claim probe success.
+
+The shared encoder has a correlated `response_encoding_failed` fallback on
+serialization/frame errors, mapped to `frame_limit` after supervised exit.
+No Windows runtime or physical input/display acceptance is
+claimed. Initialized output may leave brightness/display changed after release.
 
 ## 10. Offline control-map export
 

@@ -576,6 +576,10 @@ Outcome:
 - `read_only`: exactly `report.output_attempts == 0`.
 - `report`: Progress.
 - `error`: string/null.
+- `response_limit`: null normally; otherwise an explicit export-budget failure
+  record containing `omitted_fields` (fixed field names), `captures_dropped`,
+  `inputs_dropped` (nonnegative integers), and `serialization_failed` (boolean).
+  This field is required even when null. Unknown/missing record fields fail.
 
 Progress fields:
 
@@ -647,6 +651,18 @@ Old query firmware remains recorded but fails before status/keymap/LED operation
 
 Attempt shutdown after an attempted LED test even if its response timed out or later acquisition failed, **unless any write failed**. Reuse existing RPC/framing state, so cleanup may also fail on accumulated parse/budget problems.
 
+Read-budget exhaustion does not prohibit the shutdown write. Cleanup drains
+for the fixed 50ms interval while the original 512-report budget permits reads;
+if exhausted before or during that drain, stop it without another read and send
+the complete shutdown request once. Do not extend/reset the read budget, retry
+writes, or read an acknowledgement at the limit. After full shutdown writes,
+set `cleanup_error` to `Micro read budget exhausted; cleanup drain incomplete;
+shutdown written without acknowledgement` and leave `led_clear_acknowledged=false`.
+Preserve an existing primary acquisition error; if cleanup was the first
+failure, it becomes the primary error too. A short/failed shutdown write stops
+immediately with its actual write error instead. All non-cleanup drains retain
+the full fixed-interval contract or fail before their RPC write.
+
 Clear acknowledgement proves an RPC result, not witnessed darkness. Clear failure sets `cleanup_error`, leaves acknowledgement false, and converts prior success to failure. If there was already a primary failure, retain it as `error` while also preserving cleanup error.
 
 Pre-open/descriptor/option failures may retain their current phase rather than `failed` because runner finalization was not reached. Health-check success retains `health_check`.
@@ -660,6 +676,77 @@ Launch same executable's internal diagnostic worker through shared bounded-stdio
 - Keymap: another `5000ms`.
 
 Reject deserialized output asserting ready/qualified, inconsistent read-only accounting, or more than `128` captures/inputs. Shared supervisor internals are a separate contract.
+
+#### Explicit CLI integration and current platform limits
+
+`micro-probe` accepts only `--capture-ms` followed by unsigned ASCII decimal
+`0..30000` (default `2000`) and the valueless `--query`, `--read-keymap`,
+`--test-pattern`, and `--health-check` flags. Dependency/conflict rules above
+apply regardless of option order. Unknown, duplicate, missing or malformed
+options fail before worker launch; there is no port/path/command selector.
+
+Live access uses the shared private `__probe-worker` route with a framed,
+complete options object and kind `micro_hid_probe`. Its coordinator uses a
+Micro-only static allowlist; the hidden worker's compiled diagnostic registry
+also contains health, CT and AKP03 kinds. The callback validates all options,
+checks detached, one-process kill-on-close Windows Job containment or the macOS
+ARM64 process-group worker capability (platform appendix §8.7), and only
+then constructs a native backend. Framing rejects duplicate JSON keys; typed
+outcomes/progress reject unknown or missing fields. Results are the complete
+outcome schema above, with failed reports on stderr and nonzero CLI status.
+Worker failures use `status: worker_error`; no partial success JSON is printed.
+Windows supervision can additionally wait up to five seconds for exit
+and one second for I/O joining after failure; macOS group cleanup has a two-second
+budget per attempt (Drop may retry once) and closes parent pipes synchronously.
+Unresolved cleanup fences reuse.
+The result policy runs **after** all native sequencing and attempted LED
+cleanup. It measures compact serialized bytes without building unbounded output.
+Payloads must fit 65280 bytes, reserving 256 bytes within the unchanged 65536-byte
+frame for the envelope and maximal worker identity. If the original outcome
+cannot fit, set `probe_succeeded=false`, append an explicit response-limit error,
+and populate `response_limit`; bounded native primary/cleanup errors, counts and
+LED attempt/acknowledgment flags remain intact.
+
+Rebuilding reserves another 1024 bytes for omission metadata. Preserve whole
+status then whole keymap values when each fits; otherwise export null and list
+`device_status`/`keymap` in `omitted_fields`. Then retain complete observed-input
+and raw-capture prefixes in that order, recording exact omitted row counts.
+Never clip JSON values, messages or hex strings; a non-fitting input terminates
+the retained prefix. Dropped captures also set `capture_truncated=true`.
+This is a failed diagnostic export, not successful full observation.
+
+If scalar text or serialization prevents even that report from fitting, a
+compact typed failure retains numeric progress and write/cleanup flags, records
+omitted descriptive fields (`firmware`, `candidate`, `phase`, `error`,
+`cleanup_error` as applicable), and uses phase `response_limit`. Primary errors
+over 4096 bytes are explicitly omitted; normal bounded primary errors are
+preserved with the limit error appended. No new I/O or cleanup is attempted by
+result budgeting. The shared frame encoder also returns a correlated compact
+`response_encoding_failed` outcome if serialization/frame encoding fails;
+the coordinator reports `frame_limit` rather than unexplained EOF.
+
+`--health-check` bypasses backend construction and all device I/O in the child.
+On platforms without the Windows/macOS ARM64 supervisor it returns only the pure health
+report in-process; this is not a live-I/O fallback. Native probing requires
+`micro-hid`. Windows reads optional exact BusTypeGuid metadata through a bounded
+native parent walk across logical HID bus nodes, stopping at missing/unknown
+transport and classifying only the documented USB bus GUID. Incomplete scans
+or unresolved matching candidates fail closed, not false-unique.
+Native interface numbers and
+original report descriptors remain unavailable, so live probes fail closed
+before transport open/reports. The report-descriptor IOCTL is HID minidriver
+traffic, not a supported user-mode collection request; no parsed-data or path
+substitute is accepted. All Windows HID access requires a private scoped
+contained-child capability and post-open identity/bus revalidation; see
+platform appendix §2.5. macOS ARM64 now uses the same-executable bounded process-group worker;
+all IOKit access and writes require its private scoped capability and a
+same-executable parent. No ordinary in-process native access or live fallback
+exists. Exact native property/descriptor evidence remains required and unverified
+on hardware. A child-side 50 ms parent-lifetime watchdog can terminate a blocked
+main thread on parent death; it is not kernel-enforced parent-death or
+escape containment and cannot overcome process suspension/OS-driver stalls. Killing
+the child cannot prove LED clearing. No hardware, Windows runtime containment,
+or physical input/output acceptance is claimed.
 
 Offline replay requires `1..128` ASCII strings, each `128` hex characters encoding exactly `64` bytes; upper/lowercase hex accepted, whitespace/wrong lengths invalid. Feed fresh framing decoder with time always zero. Return:
 

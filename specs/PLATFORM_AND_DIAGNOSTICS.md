@@ -65,7 +65,8 @@ Each support entry is one of:
 | Durable action-writer quiescence | Unavailable | Unavailable | Unavailable | Unavailable |
 | Process/window/desktop/serial observations | Implemented | Unsupported | Unsupported | Unsupported |
 | Explicit process/UI/console qualification probes | Implemented | Unsupported | Unsupported | Unsupported |
-| Framed, Job-contained diagnostic workers | Implemented | Unsupported | Unsupported | Unsupported |
+| Framed, Job-contained diagnostic workers | Implemented; private live-HID scope | Unsupported | Unsupported | Unsupported |
+| Framed HID/health workers | Job-contained; optional HID metadata, live probes fail closed | Unsupported | Process-group, compiled ARM64 | Unsupported |
 
 Clock prerequisites: nonnil runtime epoch, same native source, same boot.
 
@@ -110,19 +111,98 @@ On Linux/macOS, reviewed host-specific native discovery and permissions remain r
 
 Device labels are neutral capability classes, not provenance assertions:
 
-| Class | Transport | Compiled discovery | Compiled diagnostic transport |
-|---|---|---|---|
-| Primary USB controller | USB | Its HID feature on Windows/macOS | Same prerequisite |
-| Related wireless controller | Bluetooth | Primary HID feature on macOS only | Same prerequisite |
-| Alternate controller, original profile | USB | Alternate HID feature on Windows/macOS | Unavailable: decode-only original profile |
-| Alternate controller, second-revision profile | USB | Alternate HID feature on Windows/macOS | Same prerequisite |
-| Serial control surface | Serial | Windows | Windows |
+This describes the emitted `portable_inventory()` fields, not a broader design
+matrix or native scan. Standalone discovery is always unavailable. On macOS
+ARM64, the reason `metadata_only_inside_explicit_hid_probe` is emitted only for
+the matching enabled family feature; it means metadata can be obtained inside
+an explicitly opted-in supervised HID probe, not that discovery ran.
 
-Compiled transport requires the exact profile, permissions, and human opt-in. Missing feature/backend is unavailable. Every row is runtime-unqualified.
+| macOS ARM64 build | Primary USB / related Bluetooth (`micro-hid`) | Alternate second revision (`akp03-hid`) |
+|---|---|---|
+| Default (neither HID feature) | Discovery unavailable: `feature_disabled`; diagnostic unavailable | Discovery unavailable: `feature_disabled`; diagnostic unavailable |
+| Micro only | Metadata-only discovery reason; compiled diagnostic prerequisite | Discovery unavailable: `feature_disabled`; diagnostic unavailable |
+| AKP03 only | Discovery unavailable: `feature_disabled`; diagnostic unavailable | Metadata-only discovery reason; compiled diagnostic prerequisite |
+| Both HID features | Metadata-only discovery reason; compiled diagnostic prerequisite | Metadata-only discovery reason; compiled diagnostic prerequisite |
+
+Disabled-family diagnostic transport retains reason `device_backend_not_integrated`.
+The original alternate profile stays discovery-unavailable with that reason and
+diagnostic-unavailable with `decode_only_original_profile` in every build.
+The serial row stays unavailable with `device_backend_not_integrated`. Windows
+and Linux neutral device-inventory rows are unchanged; Windows CT CLI availability
+is reported separately as `ct_serial_probe_available`, not inferred from these
+rows. `micro-firmware` does not enable HID metadata or probing.
+
+Compiled transport still requires the exact profile/native evidence, permissions,
+private worker capability and human opt-in. Every row is runtime-unqualified.
 
 Maintenance for the primary USB controller imports the maintenance subsystem's capability. Other controller families advertise unavailable maintenance. This inventory does not perform maintenance.
 
 Aggregate action support remains unavailable until provider, host, durability, lifecycle, device timing, and writer-quiescence gates pass.
+
+### 2.5 Windows HID evidence and residual scope
+
+With `micro-hid` or `akp03-hid`, Windows x64/ARM64 can collect optional
+metadata only inside a validated, explicitly opted-in HID worker callback.
+A private thread-bound, per-request capability checks the detached,
+one-process, no-breakaway, kill-on-close Job before backend construction and
+native operations. Health and ordinary in-process callers receive no capability;
+expiry or failed containment revalidation denies further access. OS/driver
+stalls are bounded only by the existing disposable worker supervision, not
+by an in-process fallback or a guaranteed per-call timeout.
+
+| Artifact | Native source and exact acceptance | Remaining limitation |
+|---|---|---|
+| Bus | `SetupDiGetDeviceInterfaceDetailW` supplies the collection's `SP_DEVINFO_DATA.DevInst`; `CM_Get_DevNode_PropertyW(DEVPKEY_Device_BusTypeGuid)` must succeed with exactly `DEVPROP_TYPE_GUID` and 16 bytes. An exact `GUID_BUS_TYPE_HID` permits `CM_Get_Parent` traversal, bounded to 16 nodes. At the first non-HID bus, only `GUID_BUS_TYPE_USB` (`9d7debbc-c85d-11d1-9eb4-006008c3a19a`, Wdmguid.h) maps to USB. Other valid GUIDs map to `Unknown`; an explicitly missing property remains unavailable and stops traversal. | The collection may report only a logical HID bus. Never search past an unknown/missing transport for USB ancestry (for example a Bluetooth adapter); no string/path/hardware-ID/usage inference. Wrong type/size, transient property/parent failures, cycles and walk-cap exhaustion abort enumeration/open. Bluetooth classification is not implemented without a documented bus-GUID contract. |
+| Interface number | Unavailable (`None`). | No documented exact `bInterfaceNumber` source was confirmed for this user-mode collection path. Do not parse `mi_` or inspect `HIDP_CAPS` reserved fields. |
+| Original report descriptor | `EvidenceUnavailable(RawReportDescriptor)`, without issuing a descriptor IOCTL. | Microsoft lists `IOCTL_HID_GET_REPORT_DESCRIPTOR` under **HID Minidriver IOCTLs**, sent only by HIDClass to minidrivers, not by user-mode applications to collection handles. `IRP_MJ_DEVICE_CONTROL` on the individual IOCTL page does not change this contract. Collection-descriptor/preparsed-data APIs return parsed data, not the original bytes; reconstruction is prohibited. |
+
+Bus reads use a fixed 16-byte buffer, never an allocation or retry based on an
+untrusted required size. The entire observed devnode/GUID ancestry prefix is
+retained. `CR_NO_SUCH_VALUE` is explicit missing-property evidence, not a
+transient failure and not permission to walk farther. Other CM failures,
+including a disappeared devnode/parent, retain their raw `CONFIGRET` code in
+`HidError::Os` with the enumeration/open operation. SetupAPI/file failures retain
+Win32 codes; failed `HidP_GetCaps` retains its signed native status.
+SetupAPI scans at most 4096 interfaces, caps each
+detail buffer at 4096 bytes and validates a terminated UTF-16 path within the
+returned extent and the 512-byte metadata limit. Only `ERROR_NO_MORE_ITEMS`
+completes a scan normally; every other enumeration/detail error or reaching
+the scan cap fails closed, never returning a partial/false-unique inventory.
+An unresolved matching-VID/PID candidate's open, attributes, caps or bus read
+failure also aborts the inventory rather than hiding another device.
+Explicitly missing bus properties retain the candidate with unavailable bus
+metadata; they do not drop it. At most 64 enumerated
+candidates retain evidence. Opening requires the same backend's retained
+descriptor, then re-reads attributes/caps/strings on the opened handle and
+re-resolves that exact collection path through SetupAPI for the same bounded
+CM ancestry/property walk. Any identity, report-size, optional metadata,
+devnode ancestry or raw GUID mismatch fails closed, even when both GUIDs
+would classify as `Unknown`. Native read failures are preserved rather than
+collapsed into `NotFound`. Composite
+reopen may change only primary usage; all other checks remain.
+These are post-open observations, not an atomic PnP/physical identity guarantee.
+USB classification is available only when the exact native walk reaches the
+USB bus; it is not a claim that collection properties yield USB in practice.
+
+Micro/AKP03 still fail closed at the missing interface gate before transport
+open/report I/O. Optional metadata does not promise successful Windows live
+probing or physical qualification. Fake API-seam tests cover property
+type/size/value and transient failures, bounded ancestry, incomplete scans,
+exact ancestry/GUID revalidation and scoped authority.
+Exact/empty/oversized descriptor tests exercise the shared injectable transport
+boundary (1..=1024 bytes); they do not demonstrate Windows raw-descriptor
+retrieval. No hardware or Windows runtime acceptance is claimed.
+
+Official contracts:
+[HID APIs](https://learn.microsoft.com/en-us/windows-hardware/drivers/hid/hid-api),
+[HID Minidriver vs Class Driver IOCTLs](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_hid/),
+[report-descriptor IOCTL](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/hidport/ni-hidport-ioctl_hid_get_report_descriptor),
+[BusTypeGuid](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/devpkey-device-bustypeguid),
+[bus GUID definition contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/irp-mn-query-bus-information),
+[CM_Get_DevNode_PropertyW](https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_get_devnode_propertyw),
+[CM_Get_Parent](https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_get_parent),
+[SetupDiEnumDeviceInterfaces](https://learn.microsoft.com/en-us/windows/win32/api/setupapi/nf-setupapi-setupdienumdeviceinterfaces),
+[SetupDiGetDeviceInterfaceDetailW](https://learn.microsoft.com/en-us/windows/win32/api/setupapi/nf-setupapi-setupdigetdeviceinterfacedetailw).
 
 ## 3. Shared observation and error contracts
 
@@ -612,11 +692,12 @@ Report includes sorted member identities INCLUDING helper, target/helper, option
 
 Console HWND can be message-only under pseudo-console hosting and is not a terminal-pane HWND. Two equal lists are not atomic membership lease. No screen read or input opening.
 
-## 8. Framed Windows disposable-worker service
+## 8. Framed disposable-worker service
 
 ### 8.1 Admission
 
-Launch only current executable with hidden argument **`__probe-worker`**, no shell and no caller-selected executable.
+Launch only current executable with hidden argument **`__probe-worker`**, or
+the fixed AKP03-only **`__akp03-worker`** route, no shell and no caller-selected executable.
 
 Public request:
 
@@ -636,7 +717,17 @@ Timeout **1ms through120s inclusive**. Check order:
 4. Bounded encoding.
 5. Platform dispatch.
 
-Non-Windows valid request returns unsupported-platform after these earlier checks. Non-Windows worker service does not invoke callback.
+Windows uses the Job service below. Its child issues private, thread-bound,
+per-request HID authority only after validating the complete typed Micro/AKP03
+options, the entire frame/EOF and allowlist, and the detached one-process,
+no-breakaway, kill-on-close Job. Health, other kinds and in-process callers
+receive no HID authority; native access and stale scopes are checked as in
+§2.5. Optional bounded native ancestry metadata does not make Windows live
+probes available: interface-number/raw-descriptor gates still fail closed.
+macOS ARM64 additionally admits only health,
+Micro and AKP03 requests (§8.7), validating complete typed HID options before
+spawn. Other non-Windows targets return unsupported-platform after these checks
+without invoking callbacks. CT remains Windows-only.
 
 ### 8.2 Exact framing
 
@@ -684,12 +775,21 @@ Wire response:
 ```
 
 Alternate outcome: `{"status":"callback_failed"}`.
+Encoding failure outcome: `{"status":"response_encoding_failed"}`.
+
+Encode the full response before writing any protocol stdout. If callback
+serialization or the 65536-byte frame budget fails, encode this compact fallback
+with the same version, nonce and worker identity, write it, then exit normally.
+The supervisor maps it to `frame_limit` after pipe/exit completion. It is not
+probe success or proof that no device writes occurred. No frame bound is relaxed.
+Device callbacks reserve 256 bytes for maximal envelope/identity overhead, and
+apply their explicit result-omission policies after cleanup.
 
 Envelope/request/worker records reject unknown fields. Arbitrary payload does not. Do not impose blanket unknown-field rejection on outcome internals beyond actual schema behavior.
 
 Require response version1, matching nonce, exact retained PID AND creation time. Nonce is accidental-mixup protection, not cryptographic same-user authentication.
 
-### 8.3 Containment and startup
+### 8.3 Windows containment and startup
 
 One active probe per supervisor process, acquired nonblocking:
 
@@ -786,13 +886,105 @@ Cleanup:
 Failure precedence matters:
 
 - Framed callback_failed -> `callback`.
-- Oversized callback response may become `transport`, because worker cannot encode/write response.
+- Oversized cooperative callback response becomes correlated `response_encoding_failed`,
+  mapped to `frame_limit`; an uncooperative/raw oversized fixture can still fail
+  as `transport` or `frame_limit`.
 - Stdout `not-a-frame` -> `frame_limit`, as first four bytes decode as excessive length.
 - Nonzero exit -> `worker_failed` only once required pipe results/drain are available; earlier transport/protocol failures can win.
 
+### 8.7 macOS ARM64 HID/health platform block
+
+The existing Rust executable uses the exact hidden `__probe-worker` and
+AKP03-only `__akp03-worker` routes, the same static registries, protocol version,
+65536-byte frame, 65280-byte callback budget, and 16384-byte discarded-stderr
+limit. Hidden routing rejects extra arguments. Parent and child both reject
+unsupported kinds and malformed/unknown/missing typed options; the child also
+requires one entire frame and EOF, rejects duplicate JSON keys, and rechecks
+the route's allowlist before invoking any callback. No CT or Linux live route
+is added.
+
+The parent spawns only `current_exe` with `process_group(0)` and three pipes.
+It verifies child PGID == PID and retains the native `proc_bsdinfo` PID/start
+time. The existing `creation_time_100ns` field carries Unix-epoch process start
+time on macOS, not Windows FILETIME. Response version, nonce, PID and this
+native start time must all match.
+
+Nonblocking parent I/O pumps bounded stdin, stdout and discarded stderr without
+I/O threads, polling every 5 ms. Deadline includes spawn, input, callback,
+response, EOF and exit observation. Micro deadlines are capture+20000 ms,
+another 5000 ms for keymap; AKP03 is capture+15000 ms; health is 3000 ms.
+A caller may shorten but not extend these device-spec budgets. Success requires
+complete send, both output EOFs, valid correlated outcome, zero exit and cleanup.
+
+On failure, timeout, cancellation or output overflow, reuse the Unix group
+guard: WNOWAIT reserves the leader PID, signal its group with SIGKILL **before**
+reaping, and allow up to 2 seconds per cleanup attempt (Drop may retry once,
+up to 4 seconds total after failure). This also occurs on success to
+dispose of any remaining group members. The macOS sole-zombie-group check handles
+EPERM conservatively. Parent pipes are explicitly closed; no I/O tasks survive.
+Unconfirmed signal/reap or ambiguous close returns `cleanup_unconfirmed`,
+forbids replacement and stickily blocks the process-local supervisor. A previous
+portable-child cleanup uncertainty also blocks this service.
+
+The child checks PGID == PID and that all three standard descriptors are pipes,
+then starts an independent parent-death watchdog before reading stdin and
+acquires close-on-exec duplicates. The watchdog retains the parent's native
+PID/start time, requires a live matching parent and a startup acknowledgement
+within one second, and polls every 50 ms. Parent reparenting, zombie/exited state,
+lifetime mismatch or unavailable observation causes SIGKILL of the worker's
+retained process group with `_exit(1)` fallback. It does not need HID locks,
+Rust destructors or cooperation from a blocked main thread. It also enforces
+a 120-second maximum before full request receipt, narrowed to the validated
+device-spec budget measured from watchdog startup. On ordinary completion,
+it is stopped/unparked and joined using the remaining original child budget,
+not a separate short shutdown grace. While waiting, the main thread continues
+checking the retained parent lifetime and child deadline; either failure, a
+watchdog panic or missing startup acknowledgement terminates the group. The
+supervisor still enforces any shorter caller deadline, including shutdown,
+EOF and exit. A delayed watchdog alone does not change a successful response
+into worker failure while those deadlines remain satisfied; success still
+requires zero exit and confirmed process/I/O cleanup.
+
+Only after full request validation and watchdog startup can the child establish
+a private thread-bound, per-request HID capability. Native access additionally
+requires the parent process image path and current executable path to
+canonicalize successfully and match. Ordinary in-process `native_backend()` calls fail with typed
+`UnsupervisedAccess`; health gets no HID capability and never constructs a
+backend, enumerates or opens. IOKit enumeration/open/descriptor/read and output
+check the capability. A stale capability cannot revive in another request.
+Numbered output retains its report ID; unnumbered output strips the synthetic
+zero. Synchronous `IOHIDDeviceSetReport` has no individual write deadline:
+only the supervised child's lifetime is bounded. Reopened identity is reread
+from native properties; unavailable or mismatching evidence fails closed.
+Stopped/finished IOKit run loops return a static protocol error; timed-out
+run-loop slices return read timeout instead of spinning.
+
+This is trusted-code liveness containment, not hostile-code/same-user
+authentication, an escape-proof sandbox, proof of physical output cleanup, or
+device qualification. Health reports `parent_death_watchdog=true` and 50 ms
+polling, but retains `parent_death_guarantee=false`: a user-space watchdog is
+not a kernel-enforced parent-death guarantee or a hard scheduling/driver bound.
+It cannot run while the entire process is suspended, prove escaped-descendant
+death, or overcome an uninterruptible OS/driver failure. It does not provide a
+durable replacement grant or reaping proof after the supervisor itself dies;
+only the live supervisor's normal process/I/O cleanup can grant replacement.
+Self-authored tests observe orphaned blocked workers exiting and being reaped
+after SIGINT/SIGKILL of the parent, and exercise held pipes and truncated
+response headers/bodies. No hardware was accessed.
+IOKit property/descriptor and physical input/output behavior remain unverified.
+Standalone doctor discovery remains unavailable; diagnostic metadata is obtained
+only inside the explicit HID probe child. Windows uses the separate Job
+service, not this process-group block. Its HID backend now requires the
+private validated live-child scope described in §2.5/§8.1, retains bounded
+native bus ancestry and rejects incomplete enumeration. The underlying Job
+lifetime/cleanup service remains as specified above; Windows interface numbers
+and original report descriptors remain unavailable, so live probes fail
+closed before transport open/report I/O. Windows runtime/physical acceptance
+is still unverified.
+
 ## 9. Portable bounded stdio diagnostics
 
-Separate from framed Windows worker. Internal caller supplies a Command; this does not expose arbitrary process launch to external request payloads.
+Separate from the framed worker service. Internal caller supplies a Command; this does not expose arbitrary process launch to external request payloads.
 
 Common:
 
@@ -839,6 +1031,10 @@ Acquisition:
 4. Nonblocking exclusive lock; would-block -> `busy`, other failure -> `unavailable`.
 5. Validate root/held-file/name association through safe-root lock validator; failure `ownership_changed`.
 6. Hold root/file; generate fresh random runtime epoch.
+
+The Rust `RuntimeOwnerLease` API receives the approved authority root
+explicitly. It does not derive that root from a configuration root, create a
+missing anchor, write owner data, or infer a dead owner.
 
 Every epoch read rechecks zero length and root/held-file/name association before returning same epoch. Metadata failure unavailable; size/association failure ownership_changed.
 
@@ -978,7 +1174,9 @@ Use test-only callbacks, never expand production allowlist for fixtures:
 4. Stall60s with750ms deadline -> timed_out, retained worker identity, confirmed exit, replacement allowed; controlled elapsed under10s; next health succeeds.
 5. Cancel stalled probe after750ms -> confirmed exit before cancelled safe-replacement result.
 6. Private callback error -> generic callback, no private text.
-7. 128KiB response -> transport in current failure mapping.
+7. Cooperative callback returning a 128KiB value -> correlated
+   `response_encoding_failed` fallback, mapped to `frame_limit` after confirmed
+   worker exit; replacement allowed. This is not an uncooperative raw-frame case.
 8. Stdout `not-a-frame` -> frame_limit.
 9. Stderr32KiB -> diagnostic_limit.
 10. Each fully cleaned failure permits subsequent health.

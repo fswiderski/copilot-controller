@@ -3,7 +3,7 @@ name = "copilot-controller"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
-description = "Offline foundation contracts for a six-slot controller"
+description = "Offline codecs, diagnostics, and integration for a six-slot controller"
 
 [lib]
 name = "copilot_controller"
@@ -15,12 +15,61 @@ path = "src/main.rs"
 
 [features]
 default = []
+# HID features enable the explicit-opt-in native HID backend (Windows x64/ARM64,
+# macOS ARM64); other targets report typed unavailability. No updater backend.
 akp03-hid = []
 micro-hid = []
-micro-firmware = ["micro-hid"]
+# Offline pinned-artifact validation must not implicitly enable native HID.
+micro-firmware = []
+
+[[example]]
+name = "portable_test_helper"
+path = "src/native/portable/tests/helper.rs"
+test = false
+
+[[example]]
+name = "windows_worker_fixture"
+path = "src/native/windows_worker/tests/worker_fixture.rs"
+test = false
+
+[[example]]
+name = "macos_worker_fixture"
+path = "src/native/windows_worker/tests/macos_fixture.rs"
+test = false
+
+[[test]]
+name = "windows_worker_integration"
+path = "src/native/windows_worker/tests/windows_integration.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value", "arbitrary_precision"] }
 unicode-general-category = "=1.1.0"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+ryu = "1"
+jpeg-encoder = "0.6"
+
+[dev-dependencies]
+jpeg-decoder = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Devices_Properties",
+    "Win32_Devices_Communication",
+    "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp", "Win32_System_Performance",
+    "Win32_System_Registry", "Win32_System_RemoteDesktop",
+    "Win32_System_StationsAndDesktops", "Win32_System_Threading",
+    "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows = { version = "0.62", features = [
+    "Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility",
+] }

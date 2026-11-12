@@ -2,7 +2,7 @@
 
 pub mod config;
 pub mod identity;
-mod strict;
+pub(crate) mod strict;
 pub mod time;
 pub mod vocabulary;
 

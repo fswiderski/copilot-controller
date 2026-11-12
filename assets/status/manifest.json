@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "artifacts": [
+    {
+      "status": "idle",
+      "id": "state-idle",
+      "file": "idle.svg",
+      "sha256": "4b910aafb85bd71a8374cdf380361e1c1c38f705f3684cafb45ce11f418f9177"
+    },
+    {
+      "status": "working",
+      "id": "state-working",
+      "file": "working.svg",
+      "sha256": "26bdbd19772b74a934e64f1b6d9aa774f87e4e4d0f3d15c0b5d176c6ad1065e6"
+    },
+    {
+      "status": "complete",
+      "id": "state-complete",
+      "file": "complete.svg",
+      "sha256": "cba7b018a8abbbdf499d65042736096d3f887b683cd00b1fba4435924ff48a15"
+    },
+    {
+      "status": "waiting",
+      "id": "state-waiting",
+      "file": "waiting.svg",
+      "sha256": "fdc8882ed761de8b5837e2e327706be16da7ddd87bc593422388c51963b3d488"
+    },
+    {
+      "status": "error",
+      "id": "state-error",
+      "file": "error.svg",
+      "sha256": "85d83f8dcd0c6afe0554560c495c48b5a714109bdbc0529aeec0a83ac0e31f09"
+    },
+    {
+      "status": "unknown",
+      "id": "state-unknown",
+      "file": "unknown.svg",
+      "sha256": "1bc42c4fcaad362b2e834dd91c26ff4aa1e94a634a3c01718d36586d4bf2fa1b"
+    }
+  ]
+}

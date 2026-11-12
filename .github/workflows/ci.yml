@@ -1,0 +1,160 @@
+name: Rust validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  native:
+    name: Native ${{ matrix.platform }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            arch: X64
+            runner: ubuntu-24.04
+            rust-host: x86_64-unknown-linux-gnu
+          - platform: Windows
+            arch: X64
+            runner: windows-2022
+            rust-host: x86_64-pc-windows-msvc
+          - platform: macOS
+            arch: ARM64
+            runner: macos-15
+            rust-host: aarch64-apple-darwin
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify native runner
+        env:
+          EXPECTED_OS: ${{ matrix.platform }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          echo "Native runner: $RUNNER_OS / $RUNNER_ARCH"
+          echo "Synthetic validation only; no physical acceptance."
+          test "$RUNNER_OS" = "$EXPECTED_OS"
+          test "$RUNNER_ARCH" = "$EXPECTED_ARCH"
+
+      - name: Prepare approved Unix roots
+        if: runner.os != 'Windows'
+        run: bash .github/workflows/ci-roots-unix.sh
+
+      - name: Prepare approved Windows roots
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/workflows/ci-roots-windows.ps1
+
+      - name: Install and verify Rust 1.99.1
+        env:
+          EXPECTED_HOST: ${{ matrix.rust-host }}
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --no-self-update --component rustfmt --component clippy
+          rustc +1.99.1 -vV
+          test "$(rustc +1.99.1 -vV | sed -n 's/^host: //p' | tr -d '\r')" = "$EXPECTED_HOST"
+
+      # Fixtures must use COPILOT_CONTROLLER_TEST_ROOT (or the explicitly
+      # redirected temporary directory), create unique private children, and
+      # use fake transports. Feature selection never authorizes hardware I/O.
+      - name: Build self-authored diagnostic fixtures
+        run: |
+          cargo +1.99.1 build --locked --examples --all-features
+          suffix=""
+          if test "$RUNNER_OS" = Windows; then suffix=".exe"; fi
+          echo "PORTABLE_TEST_HELPER=$CARGO_TARGET_DIR/debug/examples/portable_test_helper$suffix" >> "$GITHUB_ENV"
+          echo "WINDOWS_WORKER_TEST_HELPER=$CARGO_TARGET_DIR/debug/examples/windows_worker_fixture$suffix" >> "$GITHUB_ENV"
+          echo "MACOS_WORKER_TEST_HELPER=$CARGO_TARGET_DIR/debug/examples/macos_worker_fixture$suffix" >> "$GITHUB_ENV"
+
+      - name: Test default features
+        run: |
+          umask 077
+          cargo +1.99.1 test --locked --all-targets
+          cargo +1.99.1 test --locked --doc
+
+      - name: Test all features
+        run: |
+          umask 077
+          cargo +1.99.1 test --locked --all-targets --all-features
+          cargo +1.99.1 test --locked --doc --all-features
+
+      - name: Test approved native persistence roots (Unix only)
+        if: runner.os != 'Windows'
+        run: |
+          umask 077
+          cargo +1.99.1 test --locked --lib --all-features persistence:: -- --include-ignored
+
+      - name: Test synthetic macOS worker containment (no hardware)
+        if: runner.os == 'macOS'
+        run: |
+          cargo +1.99.1 build --locked --example macos_worker_fixture
+          cargo +1.99.1 test --locked --lib native::windows_worker -- --include-ignored
+          cargo +1.99.1 build --locked --all-features --example macos_worker_fixture
+          cargo +1.99.1 test --locked --all-features --lib native::windows_worker -- --include-ignored
+
+      - name: Test macOS HID inventory feature matrix (no hardware)
+        if: runner.os == 'macOS'
+        run: |
+          cargo +1.99.1 test --locked --lib native::portable::tests::safety
+          cargo +1.99.1 test --locked --features micro-hid --lib native::portable::tests::safety
+          cargo +1.99.1 test --locked --features akp03-hid --lib native::portable::tests::safety
+          cargo +1.99.1 test --locked --features micro-hid,akp03-hid --lib native::portable::tests::safety
+
+      - name: Check formatting
+        run: cargo +1.99.1 fmt --all -- --check
+
+      - name: Clippy all features
+        run: cargo +1.99.1 clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Build release with all features
+        run: cargo +1.99.1 build --locked --release --all-features
+
+  windows-arm64:
+    name: Windows ARM64 cross-check (Windows X64 host)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify cross-check host
+        run: |
+          echo "Cross-check host: $RUNNER_OS / $RUNNER_ARCH; target: aarch64-pc-windows-msvc"
+          echo "Compilation only; this is not runtime or physical acceptance."
+          test "$RUNNER_OS" = Windows
+          test "$RUNNER_ARCH" = X64
+
+      - name: Prepare approved Windows roots
+        shell: pwsh
+        run: ./.github/workflows/ci-roots-windows.ps1
+
+      - name: Install Rust and Windows ARM64 target
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --no-self-update
+          rustup target add aarch64-pc-windows-msvc --toolchain 1.99.1
+          rustc +1.99.1 -vV
+          test "$(rustc +1.99.1 -vV | sed -n 's/^host: //p' | tr -d '\r')" = x86_64-pc-windows-msvc
+
+      - name: Cross-check default features
+        run: cargo +1.99.1 check --locked --all-targets --target aarch64-pc-windows-msvc
+
+      - name: Cross-check all features
+        run: cargo +1.99.1 check --locked --all-targets --all-features --target aarch64-pc-windows-msvc
