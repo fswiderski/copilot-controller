@@ -17,6 +17,8 @@ pub const MAX_STDOUT_BYTES: usize = 262_144;
 pub const MAX_CHILD_TIMEOUT: Duration = Duration::from_secs(120);
 
 static CLEANUP_BLOCKED: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static TEST_CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -80,6 +82,10 @@ mod implementation {
 // command or executable supplied through a public diagnostic request.
 #[allow(dead_code)]
 pub(crate) fn capture(command: &mut Command, timeout: Duration) -> Result<Vec<u8>, ChildError> {
+    #[cfg(test)]
+    let _test_capture_guard = TEST_CAPTURE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if cleanup_blocked() {
         return Err(ChildError {
             kind: ChildErrorKind::CleanupUnconfirmed,

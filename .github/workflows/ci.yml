@@ -98,7 +98,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           umask 077
-          cargo +1.99.1 test --locked --lib --all-features persistence:: -- --include-ignored
+          cargo +1.99.1 test --locked --lib --all-features persistence:: -- --include-ignored --test-threads=1
 
       - name: Test synthetic macOS worker containment (no hardware)
         if: runner.os == 'macOS'

@@ -254,7 +254,7 @@ mod windows_fixture {
             ("error", WorkerErrorKind::Callback),
             ("panic", WorkerErrorKind::Callback),
             ("large", WorkerErrorKind::FrameLimit),
-            ("stdout", WorkerErrorKind::FrameLimit),
+            ("stdout", WorkerErrorKind::Protocol),
             ("stderr", WorkerErrorKind::DiagnosticLimit),
         ] {
             let error = run(
