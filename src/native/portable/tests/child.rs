@@ -29,7 +29,7 @@ fn success_failure_output_boundaries_and_timeout() {
     let output = child::capture(&mut exact, Duration::from_secs(5)).unwrap();
     assert_eq!(output.len(), MAX_STDOUT_BYTES);
     assert!(output.iter().all(|byte| *byte == b'x'));
-    let mut excessive = helper("output");
+    let mut excessive = helper("output-stall");
     excessive.arg((MAX_STDOUT_BYTES + 1).to_string());
     assert_eq!(
         child::capture(&mut excessive, Duration::from_secs(5))

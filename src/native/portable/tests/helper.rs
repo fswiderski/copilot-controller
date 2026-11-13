@@ -19,7 +19,8 @@ fn main() {
             print!("discarded output");
             process::exit(7);
         }
-        Some("output") => {
+        Some(mode @ ("output" | "output-stall")) => {
+            let hold_open = mode == "output-stall";
             let count: usize = args.next().expect("count").parse().expect("number");
             let block = [b'x'; 8_192];
             let mut stdout = io::stdout().lock();
@@ -28,6 +29,10 @@ fn main() {
                 let part = remaining.min(block.len());
                 stdout.write_all(&block[..part]).expect("write");
                 remaining -= part;
+            }
+            stdout.flush().expect("flush");
+            if hold_open {
+                thread::sleep(Duration::from_secs(30));
             }
         }
         Some("stall") | Some("descendant") => thread::sleep(Duration::from_secs(30)),

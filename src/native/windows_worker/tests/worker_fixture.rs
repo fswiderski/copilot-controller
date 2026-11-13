@@ -87,7 +87,9 @@ mod windows_fixture {
             "panic" => panic!("PRIVATE_FIXTURE_PANIC"),
             "large" => Ok(Value::String("x".repeat(128 * 1024))),
             "stdout" => {
-                let _ = std::io::stdout().write_all(b"not-a-frame");
+                let mut stdout = std::io::stdout();
+                stdout.write_all(b"not-a-frame").unwrap();
+                stdout.flush().unwrap();
                 Ok(json!({}))
             }
             "stderr" => {
