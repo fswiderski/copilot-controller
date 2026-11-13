@@ -148,7 +148,7 @@ flowchart TD
 
 | Method | Strength | Works with | Notes |
 |---|---|---|---|
-| **Host token in the environment** | Strong | Tier 2 and tier 3 hosts that can set per-pane environment variables | The host creates a random token for each pane and generation. Copilot inherits it, and so do its hooks. The `sessionStart` hook reports `{sessionId, token}`. The host maps the token to a pane. |
+| **Host token in the environment** | Correlation only (unauthenticated) | Tier 2 and tier 3 hosts that can set per-pane environment variables | The host creates a random token for each pane and generation. Copilot inherits it, and so do its hooks. The `sessionStart` hook reports `{sessionId, token}`. The host maps the token to a pane as correlation evidence only. |
 | **Process-tree matching** | Medium | Tier 1 | Walk from the Copilot process to its terminal ancestor. Only Windows observation exists today. |
 | **Window or tab title** | Weak | Any | Display label only. Never used for targeting. |
 
@@ -167,17 +167,35 @@ sequenceDiagram
     CLI->>Hook: Run sessionStart (inherits environment)
     Hook->>Ctl: {sessionId S, token K, heartbeat}
     Ctl->>Host: Resolve token K
-    Host-->>Ctl: Pane P, generation G (only if K is live)
-    Ctl->>Ctl: Bind slot to S at (P, G)
-    Note over Host,Ctl: If the pane restarts, G changes and the binding becomes stale.
+    Host-->>Ctl: Pane P, generation G (only if K is live and first-use compatible)
+    Ctl->>Ctl: Bind slot to S at (P, G) as tier 2 correlation
+    Note over Host,Ctl: If the pane restarts, exits or rebinds, G changes and prior K is invalid.
 ```
 
 Rules:
 
 - A slot binds to a **session**, not a pane. One pane can run several Copilot
   sessions over time. One session is shown in at most one location at a time.
-- Tokens are single-purpose and short-lived. The host rejects unknown or expired
-  tokens, and the controller never treats a token as an action grant.
+- Tokens are correlation hints, never identity authentication, action grants or
+  authorisation.
+- Token scope is explicit: `{host target, pane, generation, claimed session}`.
+  Claims outside that scope are refused.
+- Tokens are single-purpose and short-lived. They expire, and are invalidated on
+  pane restart, pane exit, session exit and host-side rebind.
+- First-use semantics are strict. The first accepted `{session, token}` claim
+  wins that token scope. Exact duplicates may be idempotent for reliability, but
+  never extend expiry and never rebind to another session or target.
+- Conflicts (same token with different session/target/generation) mark
+  association `unconfirmed` and require operator-visible refusal for focus or
+  action routing.
+- Tier 2 remains unauthenticated correlation, because descendants or same-user
+  processes can copy inherited environment values and replay them.
+- Any claim of authenticated association requires independent authenticated
+  live-session evidence bound to the exact host target and generation, plus tier
+  3 host attestation. If unavailable, report `unconfirmed association` instead
+  of implying token authenticity.
+- Non-conflicting correlation can still support unauthenticated tier 2 focus.
+  It never proves confirmed presentation or permission to act.
 - The current Windows-shaped `session_root` and the opaque or native target split
   remain. Host-provided targets are a new tagged target kind and cannot be
   converted into another kind.
@@ -190,8 +208,8 @@ Two independent checks are always required:
 
 1. The controller's own action policy: generation match, three-second intent
    lifetime, duplicate-reservation tracking and same-run Stop.
-2. Approval from Copilot or the host, in the form of a grant or a pending
-   request ID.
+2. Action-specific, user-approved authenticated authority plus matching live
+   state evidence.
 
 A button press alone is never permission.
 
@@ -200,9 +218,11 @@ flowchart TD
     Press(["Key press mapped to action"]) --> Policy{"Controller policy<br/>passes?"}
     Policy -- no --> Deny1["Refuse"]
     Policy -- yes --> Channel{"Semantic channel<br/>available?"}
-    Channel -- yes --> Pending{"Matching pending<br/>Copilot request ID?"}
-    Pending -- no --> Deny2["Refuse"]
-    Pending -- yes --> Semantic["Deliver semantic action<br/>(approve R / stop T / send)"]
+    Channel -- yes --> Evidence{"Action-specific live<br/>evidence matches?"}
+    Evidence -- no --> Deny2["Refuse<br/>(unsupported/missing/<br/>stale/mismatched evidence)"]
+    Evidence -- yes --> Grant{"Scoped authenticated<br/>authority valid?"}
+    Grant -- no --> Deny2b["Refuse"]
+    Grant -- yes --> Semantic["Deliver semantic action"]
     Channel -- no --> T3{"Tier 3 host with<br/>input grant and<br/>screen evidence?"}
     T3 -- no --> Deny3["Refuse<br/>(no OS key injection)"]
     T3 -- yes --> Allowed{"Action is in the<br/>keystroke allow-list?"}
@@ -217,13 +237,28 @@ is open, what kind of selection it has, and whether the draft has changed.
 
 | Path | Evidence | Strength | Privacy cost |
 |---|---|---|---|
-| **Semantic channel** | Copilot's own pending request ID and turn ID | Strong | Low. No screen contents needed. |
+| **Semantic channel** | Copilot's own action-specific live evidence: request ID/kind, turn ID or composer/mode/history revision | Strong | Low. No screen contents needed. |
 | **Tier 3 screen evidence** | Host-derived dialog and composer fingerprints | Medium. It depends on Copilot's screen layout. | High. It needs a terminal-contents grant. |
 | **OS key injection** | None | — | Rejected, as in the current spec |
 
 **Recommendation:** use semantic actions for `accept`, `send`, `autopilot` and
 `fork`. Allow only `stop` and the four directions through the tier 3 keystroke
 fallback, and only if the user opts in.
+
+### Proposed semantic evidence requirements (API contract)
+
+| Action | Required live evidence | Required authority scope |
+|---|---|---|
+| **Accept / answer** | Pending request **ID and kind** both match | Approve-or-answer authority for that request kind and target |
+| **Stop** | Current **turn ID** matches and session is in the same run | Stop authority for that session and run |
+| **Send** | Composer revision (or equivalent freshness token) matches, plus exact prompt binding | Send authority for that session and prompt submission |
+| **Autopilot mode change** | Mode state/revision matches requested transition | Mode-change authority scoped to that transition |
+| **Fork** | Source session/history revision matches plus exact fork parameters | Fork authority scoped to source and parameters |
+
+These are proposed API requirements, not assumptions about undocumented current
+capabilities. IDs and revisions are evidence, not grants. The endpoint must
+atomically validate evidence, check authority, and consume request/reservation
+state so duplicates or TOCTOU races are rejected safely.
 
 ## 8. What to ask the Copilot CLI team for
 
@@ -235,14 +270,18 @@ control but without the cloud:
 - **Authentication:** a per-user local endpoint, such as a Unix socket or named
   pipe restricted to the user, with an explicit pairing step.
 - **State:** current turn ID, pending permission or question requests with IDs
-  and kinds, and the composer state.
-- **Actions:** answer request R, stop turn T, submit a prompt or switch mode.
-  Each action carries the ID it applies to, so stale presses fail safely.
+  and kinds, composer revision (or equivalent freshness), mode state/revision
+  and forkable history revision.
+- **Authority:** explicitly scoped, authenticated grants per action family and
+  target, with expiry and revocation.
+- **Actions:** answer request R, stop turn T, submit a prompt, switch mode or
+  fork. Each action must provide action-specific live evidence and is refused if
+  unsupported, missing, stale or mismatched.
 - **Audit:** every action appears in the session's event log with its source.
 
-This turns the hardest part of the design, UI-state evidence, into a simple
-request-ID check. It also makes the controller independent of the host for
-actions.
+This keeps action safety explicit: evidence proves freshness and target; grants
+prove approval scope. It also makes the controller independent of the host for
+most actions.
 
 ## 9. fesTerm as an optional tier 3 host
 
@@ -254,7 +293,7 @@ fesTerm is one possible tier 3 adapter. The controller must work fully without i
 | Status and metadata | Status grant that lasts until revoked |
 | Focus | `SwitchSession` through the application command model, using a typed tab ID and generation |
 | Input | Input grant (15 minutes or until revoked), bound to the exact target, encoded-input digest and length (ADR 0065, Proposed). Queued input is never replayed. |
-| Association | Per-tab, per-generation environment token (section 6) |
+| Association | Per-tab, per-generation token for unauthenticated correlation, plus authenticated live-session attestation for confirmed association (section 6) |
 | Screen evidence | Terminal-contents grant, used only for the keystroke fallback |
 
 Open question: should fesTerm **show** controller status, for example as slot
@@ -297,9 +336,9 @@ flowchart LR
 | Phase | Exit criteria |
 |---|---|
 | 1 | Status is correct for local sessions in any host. Focus reports `best_effort` and never claims confirmation. |
-| 2 | Token association binds slots to exact panes. Stale generations are rejected in tests. |
+| 2 | Token correlation binds slots to exact panes and generations. Tests cover spoof/replay/stale/expiry/conflict handling, including unconfirmed-association refusal paths. |
 | 3 | A written decision from the Copilot CLI team on a local channel. |
-| 4 | Every action is refused unless both independent checks pass. Recorded-session tests cover stale, duplicate and mismatched presses. |
+| 4 | Every action is refused unless controller policy plus action-specific evidence and scoped authority all pass. Recorded-session tests cover missing/wrong/stale evidence, missing/wrong grants, duplicate consumption and valid same-run Stop without any pending request. |
 
 ## 13. Decisions needed
 
