@@ -157,7 +157,9 @@ pub(crate) fn sync_regular<B: MaintenanceBackend>(
     // The full bounded read also rejects a replaced path before syncing.
     let _ = read_exact_regular(path, expected)?;
     let mut options = OpenOptions::new();
-    options.read(true);
+    // FlushFileBuffers on Windows requires a handle opened for writing, even
+    // though this helper does not modify the staged artifact.
+    options.read(true).write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;

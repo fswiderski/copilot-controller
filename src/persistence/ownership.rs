@@ -106,7 +106,7 @@ mod tests {
         process::{Command, Stdio},
         sync::mpsc,
         thread,
-        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+        time::{Duration, Instant},
     };
 
     struct Fixture(PathBuf);
@@ -117,14 +117,7 @@ mod tests {
                 std::env::var_os("COPILOT_PRIVATE_ROOT_FIXTURES")
                     .expect("set COPILOT_PRIVATE_ROOT_FIXTURES to an approved directory"),
             );
-            let path = base.join(format!(
-                "owner-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+            let path = base.join(format!("owner-{}-{}", std::process::id(), Uuid::new_v4()));
             #[cfg(unix)]
             {
                 use std::os::unix::fs::DirBuilderExt;
