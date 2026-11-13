@@ -1,13 +1,17 @@
+#[cfg(unix)]
 use std::ffi::OsString;
 use std::fs;
+#[cfg(unix)]
 use std::time::Duration;
 
 use super::super::UpdatePhase;
+#[cfg(unix)]
 use super::super::artifacts::{SETTINGS_END, SETTINGS_START, sha256};
 use super::super::backend::ToolOperation;
 use super::super::transaction::{check_flash_size, check_security};
 use super::common::{CandidateMutation, Fault, OpenedMutation, Run, run};
 
+#[cfg(unix)]
 const ORDER: [ToolOperation; 9] = [
     ToolOperation::Version,
     ToolOperation::Security,
@@ -40,6 +44,33 @@ fn failed(run: &Run, phase: UpdatePhase) {
             .is_some_and(|error| !error.is_empty())
     );
     assert!(run.outcome.validate_supervisor().is_ok());
+}
+
+#[cfg(not(unix))]
+#[test]
+fn firmware_update_fails_closed_when_directory_durability_is_unsupported() {
+    let run = run(Fault::None, true);
+
+    failed(&run, UpdatePhase::PersistingBackup);
+    assert_eq!(
+        run.outcome.error.as_deref(),
+        Some("directory durability is unsupported")
+    );
+    assert!(run.outcome.report.bootloader_entry_attempted);
+    assert!(!run.outcome.report.backup_verified);
+    assert!(!run.outcome.report.flash_write_attempted);
+    assert!(!run.outcome.report.firmware_verified);
+    assert!(!run.outcome.report.settings_preserved);
+    assert_eq!(
+        run.backend.operations(),
+        [
+            ToolOperation::Version,
+            ToolOperation::Security,
+            ToolOperation::FlashId,
+            ToolOperation::ReadBackup,
+        ]
+    );
+    assert_eq!(run.backend.sync_count, 2);
 }
 
 #[test]
@@ -165,10 +196,21 @@ fn all_prewrite_gates_fail_closed() {
         cases.push((StagedToolSymlink, Phase::QualifyingUsbTarget, false));
         cases
     };
+    #[cfg(not(unix))]
+    let cases = cases
+        .into_iter()
+        .filter(|(fault, _, _)| !matches!(fault, TamperToolDirectoryAfter(Op::Version)))
+        .collect::<Vec<_>>();
 
     for (fault, phase, boot_attempted) in cases {
         let run = run(fault.clone(), false);
-        failed(&run, phase);
+        let expected_phase =
+            if !cfg!(unix) && matches!(phase, Phase::VerifyingBackup | Phase::WritingFirmware) {
+                Phase::PersistingBackup
+            } else {
+                phase
+            };
+        failed(&run, expected_phase);
         assert_eq!(
             run.outcome.report.bootloader_entry_attempted, boot_attempted,
             "{fault:?}"
@@ -241,7 +283,11 @@ fn each_hid_identity_dimension_is_checked_before_bootloader_entry() {
 
 #[test]
 fn hid_location_swaps_cannot_authorize_bootloader_or_final_version() {
-    for final_phase in [false, true] {
+    #[cfg(unix)]
+    let final_phases = [false, true];
+    #[cfg(not(unix))]
+    let final_phases = [false];
+    for final_phase in final_phases {
         for location in [None, Some(0), Some(124)] {
             for fault in [
                 Fault::CandidateLocation(location, final_phase),
@@ -274,6 +320,7 @@ fn hid_location_swaps_cannot_authorize_bootloader_or_final_version() {
 }
 
 #[test]
+#[cfg(unix)]
 fn failed_recovery_flush_never_authorizes_a_write() {
     for step in 1..=4 {
         let run = run(Fault::SyncFailure(step), false);
@@ -295,6 +342,7 @@ fn failed_recovery_flush_never_authorizes_a_write() {
 }
 
 #[test]
+#[cfg(unix)]
 fn success_requires_every_gate_and_exact_tool_contract() {
     let run = run(Fault::None, true);
     let report = &run.outcome.report;
@@ -460,6 +508,7 @@ fn success_requires_every_gate_and_exact_tool_contract() {
 }
 
 #[test]
+#[cfg(unix)]
 fn failures_after_write_preserve_flags_and_never_rollback_or_retry() {
     use Fault::*;
     use ToolOperation as Op;
@@ -710,6 +759,7 @@ fn settings_symlink_is_retained_and_never_used_for_reset() {
 }
 
 #[test]
+#[cfg(unix)]
 fn tool_and_port_are_revalidated_before_each_operation() {
     for (index, previous) in ORDER[..ORDER.len() - 1].iter().copied().enumerate() {
         let run = run(Fault::TamperToolAfter(previous), false);
@@ -764,20 +814,23 @@ fn partial_and_durable_recovery_evidence_survives_failure_until_fixture_cleanup(
     );
     assert!(!partial.options.backup_dir.join("SHA256SUMS").exists());
 
-    let durable = run(Fault::ToolExit(ToolOperation::WriteImage), false);
-    failed(&durable, UpdatePhase::WritingFirmware);
-    let backup = fs::read(durable.options.backup_dir.join("full-flash.bin")).unwrap();
-    let checksum = fs::read_to_string(durable.options.backup_dir.join("SHA256SUMS")).unwrap();
-    assert_eq!(checksum, format!("{}  full-flash.bin\n", sha256(&backup)));
-    assert!(
-        durable
-            .options
-            .backup_dir
-            .join("VerifyBackup.log")
-            .is_file()
-    );
-    assert!(durable.options.backup_dir.join("WriteImage.log").is_file());
-    assert!(!durable.backend.operations().contains(&ToolOperation::Reset));
+    #[cfg(unix)]
+    {
+        let durable = run(Fault::ToolExit(ToolOperation::WriteImage), false);
+        failed(&durable, UpdatePhase::WritingFirmware);
+        let backup = fs::read(durable.options.backup_dir.join("full-flash.bin")).unwrap();
+        let checksum = fs::read_to_string(durable.options.backup_dir.join("SHA256SUMS")).unwrap();
+        assert_eq!(checksum, format!("{}  full-flash.bin\n", sha256(&backup)));
+        assert!(
+            durable
+                .options
+                .backup_dir
+                .join("VerifyBackup.log")
+                .is_file()
+        );
+        assert!(durable.options.backup_dir.join("WriteImage.log").is_file());
+        assert!(!durable.backend.operations().contains(&ToolOperation::Reset));
+    }
 }
 
 #[test]

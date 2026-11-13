@@ -241,6 +241,7 @@ pub enum Fault {
     FinalOpen,
     FinalDescriptor,
     FinalReadError,
+    #[cfg(unix)]
     FinalVersion(&'static str),
     FinalClose,
     CancelAfterFinalClose,
@@ -341,6 +342,7 @@ impl FakeBackend {
             }
         } else {
             let version = match self.fault {
+                #[cfg(unix)]
                 Fault::FinalVersion(version) => version,
                 _ => "0.6.3",
             };
