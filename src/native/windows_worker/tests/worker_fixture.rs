@@ -17,6 +17,7 @@ mod windows_fixture {
         probe,
     };
     use serde_json::{Value, json};
+    use uuid::Uuid;
     use windows_sys::Win32::Foundation::{
         ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FILETIME, GetLastError, HANDLE,
         WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -30,8 +31,9 @@ mod windows_fixture {
         QueryInformationJobObject,
     };
     use windows_sys::Win32::System::Threading::{
-        CreateEventW, GetCurrentProcess, GetProcessHandleCount, GetProcessTimes, OpenProcess,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, SetEvent, WaitForSingleObject,
+        CreateEventW, EVENT_MODIFY_STATE, GetCurrentProcess, GetProcessHandleCount,
+        GetProcessTimes, OpenEventW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE, SetEvent, WaitForSingleObject,
     };
 
     const KIND: &str = "fixture_diagnostic";
@@ -80,6 +82,17 @@ mod windows_fixture {
             }
             "echo" => Ok(payload["data"].clone()),
             "stall" => {
+                if let Some(name) = payload["ready_event"].as_str() {
+                    let name = wide(name);
+                    let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) };
+                    if event.is_null() {
+                        return Err(DiagnosticCallbackError);
+                    }
+                    let event = unsafe { OwnedHandle::from_raw_handle(event) };
+                    if unsafe { SetEvent(event.as_raw_handle()) } == 0 {
+                        return Err(DiagnosticCallbackError);
+                    }
+                }
                 thread::sleep(Duration::from_secs(60));
                 Ok(json!(null))
             }
@@ -119,6 +132,27 @@ mod windows_fixture {
             cancellation,
             &allowlist(),
         )
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(Some(0)).collect()
+    }
+
+    fn named_event(name: &str) -> OwnedHandle {
+        let name = wide(name);
+        let event = unsafe { CreateEventW(null(), 1, 0, name.as_ptr()) };
+        assert!(!event.is_null());
+        unsafe { OwnedHandle::from_raw_handle(event) }
+    }
+
+    fn wait_ready(event: &OwnedHandle, timeout: Duration) -> bool {
+        match unsafe { WaitForSingleObject(event.as_raw_handle(), timeout.as_millis() as u32) } {
+            WAIT_OBJECT_0 => true,
+            WAIT_TIMEOUT => false,
+            _ => panic!("readiness wait failed with GetLastError={}", unsafe {
+                GetLastError()
+            }),
+        }
     }
 
     fn lifetime_exited(identity: WorkerIdentity) -> bool {
@@ -174,10 +208,29 @@ mod windows_fixture {
         assert_eq!(result.payload["w2_qualified"], false);
     }
 
-    fn assert_clean_failure(error: WorkerError, expected: WorkerErrorKind) {
+    fn assert_clean_failure_after_launch(error: WorkerError, expected: WorkerErrorKind) {
         assert_eq!(error.kind, expected);
         assert!(error.replacement_allowed);
-        assert!(lifetime_exited(error.worker.unwrap()));
+        assert!(lifetime_exited(
+            error
+                .worker
+                .expect("post-launch failure must include worker identity")
+        ));
+        assert!(!format!("{error} {error:?}").contains("PRIVATE_FIXTURE"));
+        health();
+    }
+
+    fn assert_clean_failure_allow_prelaunch(error: WorkerError, expected: WorkerErrorKind) {
+        assert_eq!(error.kind, expected);
+        assert!(error.replacement_allowed);
+        if let Some(worker) = error.worker {
+            assert!(lifetime_exited(worker));
+        } else {
+            assert!(matches!(
+                expected,
+                WorkerErrorKind::TimedOut | WorkerErrorKind::Cancelled
+            ));
+        }
         assert!(!format!("{error} {error:?}").contains("PRIVATE_FIXTURE"));
         health();
     }
@@ -233,24 +286,38 @@ mod windows_fixture {
         )
         .unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(10));
-        assert_clean_failure(error, WorkerErrorKind::TimedOut);
+        assert_clean_failure_allow_prelaunch(error, WorkerErrorKind::TimedOut);
 
         let cancellation = Arc::new(AtomicBool::new(false));
-        let signal = Arc::clone(&cancellation);
-        let canceller = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(750));
-            signal.store(true, Ordering::Release);
+        let ready_event_name = format!("Local\\copilot-controller-worker-ready-{}", Uuid::new_v4());
+        let ready_event = named_event(&ready_event_name);
+        let cancellation_for_probe = Arc::clone(&cancellation);
+        let probe_worker = thread::spawn(move || {
+            run(
+                json!({"mode": "stall", "ready_event": ready_event_name}),
+                Duration::from_secs(10),
+                &cancellation_for_probe,
+            )
         });
-        let started = Instant::now();
+        if !wait_ready(&ready_event, Duration::from_secs(5)) {
+            cancellation.store(true, Ordering::Release);
+            let result = probe_worker.join().unwrap();
+            panic!("cancellation readiness handshake timed out: {result:?}");
+        }
+        cancellation.store(true, Ordering::Release);
+        let error = probe_worker.join().unwrap().unwrap_err();
+        assert_clean_failure_after_launch(error, WorkerErrorKind::Cancelled);
+
+        let prelaunch_cancelled = AtomicBool::new(true);
         let error = run(
-            json!({"mode": "stall"}),
+            json!({"mode": "health"}),
             Duration::from_secs(10),
-            &cancellation,
+            &prelaunch_cancelled,
         )
         .unwrap_err();
-        canceller.join().unwrap();
-        assert!(started.elapsed() < Duration::from_secs(10));
-        assert_clean_failure(error, WorkerErrorKind::Cancelled);
+        assert_eq!(error.kind, WorkerErrorKind::Cancelled);
+        assert!(error.replacement_allowed);
+        assert!(error.worker.is_none());
 
         for (mode, expected) in [
             ("error", WorkerErrorKind::Callback),
@@ -265,15 +332,17 @@ mod windows_fixture {
                 &AtomicBool::new(false),
             )
             .unwrap_err();
-            assert_clean_failure(error, expected);
+            assert_clean_failure_after_launch(error, expected);
         }
 
+        let busy_ready_name = format!("Local\\copilot-controller-worker-busy-{}", Uuid::new_v4());
+        let busy_ready_event = named_event(&busy_ready_name);
         let cancellation = Arc::new(AtomicBool::new(false));
         let other_cancel = Arc::clone(&cancellation);
         let stalled = thread::spawn(move || {
             loop {
                 let result = run(
-                    json!({"mode": "stall"}),
+                    json!({"mode": "stall", "ready_event": busy_ready_name}),
                     Duration::from_secs(10),
                     &other_cancel,
                 );
@@ -288,6 +357,11 @@ mod windows_fixture {
                 }
             }
         });
+        if !wait_ready(&busy_ready_event, Duration::from_secs(5)) {
+            cancellation.store(true, Ordering::Release);
+            let result = stalled.join().unwrap();
+            panic!("busy readiness handshake timed out: {result:?}");
+        }
         let started = Instant::now();
         loop {
             match run(
@@ -307,7 +381,7 @@ mod windows_fixture {
         }
         cancellation.store(true, Ordering::Release);
         let error = stalled.join().unwrap().unwrap_err();
-        assert_clean_failure(error, WorkerErrorKind::Cancelled);
+        assert_clean_failure_after_launch(error, WorkerErrorKind::Cancelled);
 
         health();
         let before = handle_count();
