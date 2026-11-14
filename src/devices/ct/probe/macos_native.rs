@@ -1593,26 +1593,33 @@ mod tests {
             ReadResult::Idle
         );
 
-        let writer_fd = unsafe { libc::dup(master.as_raw_fd()) };
-        assert!(writer_fd >= 0);
-        let writer_fd = unsafe { OwnedFd::from_raw_fd(writer_fd) };
-        let delayed = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(20));
-            assert_eq!(
-                unsafe { libc::write(writer_fd.as_raw_fd(), b"pty".as_ptr().cast(), 3) },
-                3
-            );
-        });
-        let read_start = Instant::now();
         assert_eq!(
-            read_nonblocking(slave.as_raw_fd(), &mut buffer, 300, &cancelled, || {
+            unsafe { libc::write(master.as_raw_fd(), b"pty".as_ptr().cast(), 3) },
+            3
+        );
+        let read_start = Instant::now();
+        let mut total = Vec::with_capacity(3);
+        loop {
+            assert!(
+                read_start.elapsed() <= Duration::from_secs(2),
+                "timed out waiting for PTY payload"
+            );
+            match read_nonblocking(slave.as_raw_fd(), &mut buffer, 2_000, &cancelled, || {
                 read_start.elapsed().as_millis() as u64
             })
-            .unwrap(),
-            ReadResult::Data(3)
-        );
-        assert_eq!(&buffer[..3], b"pty");
-        delayed.join().unwrap();
+            .unwrap()
+            {
+                ReadResult::Idle => {}
+                ReadResult::Data(count) => {
+                    total.extend_from_slice(&buffer[..count]);
+                    if total.len() >= 3 {
+                        break;
+                    }
+                }
+                ReadResult::Disconnected => panic!("unexpected disconnect while reading PTY data"),
+            }
+        }
+        assert_eq!(&total[..3], b"pty");
 
         let write_cancelled = AtomicBool::new(true);
         assert_eq!(

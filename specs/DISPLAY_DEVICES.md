@@ -41,8 +41,11 @@ input is **not** permission to deliver an action.
 * The Rust macOS ARM64 CT diagnostic completed a zero-duration capture on one
   USB `2ec2:0003` unit reporting firmware `[0,2,8]`: validated HTTP 101,
   28-byte identity response, firmware query and close sent, in 107 ms. No
-  display pattern was requested. This establishes that bounded connection/query
-  path only, not physical input, visual acceptance or reconnect qualification.
+  display pattern was requested. A subsequent five-second guided capture
+  received raw ID `07` pressed (`00`) and released (`01`), plus four touch
+  reports, and sent close. This establishes the bounded query path and that
+  single button transition on this unit, not general input, touch mapping,
+  visual acceptance or reconnect qualification.
 * AKP03 revision 2: one macOS unit demonstrated six upright numbered image tiles,
   volatile-scene clearing, all nine single-button presses/releases, three encoder
   pushes/releases and both encoder directions. The cleared six-tile test used
