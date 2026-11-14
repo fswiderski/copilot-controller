@@ -162,11 +162,11 @@ fn execute_with(
 }
 
 pub(super) fn callback(payload: Value) -> Result<Value, worker::DiagnosticCallbackError> {
-    callback_with(
-        payload,
-        || super::health_callback(Value::Null).map(|_| ()),
-        probe::run_native,
-    )
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let contained = worker::ct_probe_containment;
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    let contained = || super::health_callback(Value::Null).map(|_| ());
+    callback_with(payload, contained, probe::run_native)
 }
 
 fn callback_with(
@@ -267,6 +267,36 @@ fn valid_outcome(outcome: &Outcome, options: &Options) -> bool {
     match outcome {
         Outcome::ProbeError { error } => valid_progress(&error.progress, options),
         Outcome::Report { report } => {
+            #[cfg(windows)]
+            let serial_settings_valid = report.serial_settings.as_ref().is_some_and(|settings| {
+                settings.baud_rate == 256_000
+                    && settings.data_bits == 8
+                    && settings.parity == "none"
+                    && settings.stop_bits == 1
+                    && settings.binary
+                    && settings.flow_control == "none"
+                    && !settings.nul_stripping
+            });
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            let serial_settings_valid = report.serial_settings.as_ref().is_none_or(|settings| {
+                settings.baud_rate == 256_000
+                    && settings.data_bits == 8
+                    && settings.parity == "none"
+                    && settings.stop_bits == 1
+                    && settings.binary
+                    && settings.flow_control == "none"
+                    && !settings.nul_stripping
+            });
+            #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
+            let serial_settings_valid = report.serial_settings.as_ref().is_some_and(|settings| {
+                settings.baud_rate == 256_000
+                    && settings.data_bits == 8
+                    && settings.parity == "none"
+                    && settings.stop_bits == 1
+                    && settings.binary
+                    && settings.flow_control == "none"
+                    && !settings.nul_stripping
+            });
             report.schema_version == 1
                 && report.evidence == Evidence::NativeTransportObservation
                 && report.hardware_qualification == "unqualified"
@@ -295,15 +325,7 @@ fn valid_outcome(outcome: &Outcome, options: &Options) -> bool {
                     .inputs
                     .windows(2)
                     .all(|pair| pair[0].elapsed_ms <= pair[1].elapsed_ms)
-                && report.serial_settings.as_ref().is_some_and(|settings| {
-                    settings.baud_rate == 256_000
-                        && settings.data_bits == 8
-                        && settings.parity == "none"
-                        && settings.stop_bits == 1
-                        && settings.binary
-                        && settings.flow_control == "none"
-                        && !settings.nul_stripping
-                })
+                && serial_settings_valid
                 && valid_progress(&report.progress, options)
         }
     }

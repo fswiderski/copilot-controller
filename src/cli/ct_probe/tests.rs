@@ -63,6 +63,76 @@ impl Transport for FakeTransport {
     }
 }
 
+struct PreparedTransport {
+    reads: VecDeque<Vec<u8>>,
+    now: u64,
+    writes: u32,
+    fail_write_at: Option<u32>,
+    phases: Vec<probe::PhaseProgress>,
+}
+
+impl Transport for PreparedTransport {
+    fn now_ms(&mut self) -> u64 {
+        self.now
+    }
+
+    fn write(&mut self, bytes: &[u8], _: u64, _: &AtomicBool) -> Result<usize, TransportError> {
+        self.writes = self.writes.saturating_add(1);
+        if self.fail_write_at == Some(self.writes) {
+            return Err(TransportError {
+                kind: ProbeErrorKind::NativeFailure,
+                native_code: Some(22),
+            });
+        }
+        Ok(bytes.len())
+    }
+
+    fn read(
+        &mut self,
+        buffer: &mut [u8],
+        _: u64,
+        _: &AtomicBool,
+    ) -> Result<ReadResult, TransportError> {
+        if let Some(bytes) = self.reads.pop_front() {
+            buffer[..bytes.len()].copy_from_slice(&bytes);
+            Ok(ReadResult::Data(bytes.len()))
+        } else {
+            self.now += 1;
+            Ok(ReadResult::Idle)
+        }
+    }
+
+    fn progress_origin_ms(&self) -> Option<u64> {
+        Some(0)
+    }
+
+    fn initial_phases(&self) -> &[probe::PhaseProgress] {
+        &self.phases
+    }
+
+    fn port_opened_at_ms(&self) -> Option<u32> {
+        Some(18)
+    }
+
+    fn port_configured_at_ms(&self) -> Option<u32> {
+        Some(36)
+    }
+
+    fn serial_settings(&self) -> Option<SerialSettings> {
+        Some(SerialSettings {
+            baud_rate: 256_000,
+            data_bits: 8,
+            parity: "none".into(),
+            stop_bits: 1,
+            binary: true,
+            flow_control: "none".into(),
+            nul_stripping: false,
+            dtr: StaticLineMode::Off,
+            rts: StaticLineMode::Off,
+        })
+    }
+}
+
 fn fake_native(
     options: Options,
     cancelled: &AtomicBool,
@@ -87,6 +157,57 @@ fn fake_native(
     // Only the injected protocol engine runs. Mark its fixture as native evidence
     // to exercise coordinator validation; this is not a native/hardware test.
     match probe::run(options, fake, cancelled) {
+        Ok(mut report) => {
+            report.evidence = Evidence::NativeTransportObservation;
+            report.progress.evidence = Evidence::NativeTransportObservation;
+            Ok(report)
+        }
+        Err(mut error) => {
+            error.progress.evidence = Evidence::NativeTransportObservation;
+            Err(error)
+        }
+    }
+}
+
+fn prepared_native(
+    options: Options,
+    cancelled: &AtomicBool,
+    fail_write_at: Option<u32>,
+) -> Result<ProbeReport, ProbeFailure> {
+    let transport = PreparedTransport {
+        reads: VecDeque::from([
+            b"HTTP/1.1 101 Switching Protocols\nUpgrade: websocket\nConnection: keep-alive, Upgrade\n\n".to_vec(),
+            vec![0x82, 4, 4, 3, 1, b'C'],
+            vec![0x82, 6, 6, 7, 2, 1, 2, 3],
+            vec![0x82, 5, 5, 0, 1, 0, 1],
+        ]),
+        now: 100,
+        writes: 0,
+        fail_write_at,
+        phases: vec![
+            probe::PhaseProgress {
+                phase: probe::Phase::Discovery,
+                started_ms: 12,
+                elapsed_ms: 3,
+            },
+            probe::PhaseProgress {
+                phase: probe::Phase::Open,
+                started_ms: 18,
+                elapsed_ms: 6,
+            },
+            probe::PhaseProgress {
+                phase: probe::Phase::AssociationCheck,
+                started_ms: 26,
+                elapsed_ms: 4,
+            },
+            probe::PhaseProgress {
+                phase: probe::Phase::Configure,
+                started_ms: 36,
+                elapsed_ms: 9,
+            },
+        ],
+    };
+    match probe::run(options, transport, cancelled) {
         Ok(mut report) => {
             report.evidence = Evidence::NativeTransportObservation;
             report.progress.evidence = Evidence::NativeTransportObservation;
@@ -435,4 +556,45 @@ fn forged_or_private_worker_payloads_never_become_cli_output() {
     let mut private = fake_native(options.clone(), &AtomicBool::new(false), false).unwrap();
     private.progress.handshake_response_start = Some("private".into());
     assert!(callback_with(serde_json::to_value(options).unwrap(), |_, _| Ok(private)).is_err());
+}
+
+#[test]
+fn callback_accepts_seeded_progress_with_origin_zero_and_nonzero_configure_start() {
+    let options = Options {
+        capture_ms: 0,
+        ..Options::default()
+    };
+    let payload = callback_with(
+        serde_json::to_value(&options).unwrap(),
+        |opts, cancelled| prepared_native(opts, cancelled, None),
+    )
+    .expect("seeded report should remain valid");
+    assert_eq!(payload["status"], "report");
+    let elapsed = payload["report"]["progress"]["elapsed_ms"]
+        .as_u64()
+        .unwrap();
+    for phase in payload["report"]["progress"]["phases"].as_array().unwrap() {
+        let started = phase["started_ms"].as_u64().unwrap();
+        let duration = phase["elapsed_ms"].as_u64().unwrap();
+        assert!(
+            started.saturating_add(duration) <= elapsed,
+            "phase interval exceeded elapsed"
+        );
+    }
+}
+
+#[test]
+fn callback_returns_typed_probe_error_when_seeded_transport_fails_after_progress_seed() {
+    let options = Options {
+        capture_ms: 0,
+        ..Options::default()
+    };
+    let payload = callback_with(
+        serde_json::to_value(&options).unwrap(),
+        |opts, cancelled| prepared_native(opts, cancelled, Some(1)),
+    )
+    .expect("typed probe error should be accepted");
+    assert_eq!(payload["status"], "probe_error");
+    assert_eq!(payload["error"]["kind"], "native_failure");
+    assert_eq!(payload["error"]["native_code"], 22);
 }

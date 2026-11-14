@@ -13,7 +13,7 @@ input is **not** permission to deliver an action.
 
 | Device | Identity and geometry | Implemented | Not established |
 |---|---|---|---|
-| CT | USB `2ec2:0003`; center 360×270, sides 60×270, wheel 240×240 | Serial decoder, raw-control/touch naming, profile adapter, RGB565, offline tile renderer, Windows raster/PNG backend, bounded Windows diagnostic transport | Production live transport, physical orientation/rendering acceptance, general input qualification, reconnect, normal action dispatch |
+| CT | USB `2ec2:0003`; center 360×270, sides 60×270, wheel 240×240 | Serial decoder, raw-control/touch naming, profile adapter, RGB565, offline tile renderer, Windows raster/PNG backend, bounded Windows/macOS ARM64 diagnostic transport | Production live transport, physical orientation/rendering acceptance, general input qualification, reconnect, normal action dispatch |
 | AKP03 original | HID `0300:1001`, usage `ffa0:1`; six 60×60 keys | Complete-report decoder, unrotated RGB/JPEG preparation, logical preview, profile adapter | Physical interoperability, explicit releases, live original-profile probe |
 | AKP03 revision 2 | HID `0300:3002`, usage `ffa0:1`; six 64×64 keys | Explicit-state decoder, clockwise-rotated JPEG preparation, preview/profile, optional Windows/macOS HID discovery and bounded probe | Production controller qualification, Windows live acceptance, sustained use, reconnect, rollover |
 
@@ -38,6 +38,11 @@ input is **not** permission to deliver an action.
   state `00` pressed, `01` released. This proves neither its LED nor holds,
   repeats, rotation or other controls. All other mappings are reported facts
   awaiting physical verification, except circle/home, which is inferred.
+* The Rust macOS ARM64 CT diagnostic completed a zero-duration capture on one
+  USB `2ec2:0003` unit reporting firmware `[0,2,8]`: validated HTTP 101,
+  28-byte identity response, firmware query and close sent, in 107 ms. No
+  display pattern was requested. This establishes that bounded connection/query
+  path only, not physical input, visual acceptance or reconnect qualification.
 * AKP03 revision 2: one macOS unit demonstrated six upright numbered image tiles,
   volatile-scene clearing, all nine single-button presses/releases, three encoder
   pushes/releases and both encoder directions. The cleared six-tile test used
@@ -682,10 +687,14 @@ containing `health`, `ct_serial_probe`, `micro_hid_probe`, and
 `akp03_hid_probe`; the health coordinator retains health-only authority.
 CT's callback validates the object payload before
 calling `devices::ct::probe::run_native`; only the contained disposable Windows
-worker owns native serial handles, overlapped storage and the mutex. The callback
-also checks detached, one-process kill-on-close Job containment using the existing
-health diagnostic before native access, refusing a direct uncontained hidden
-worker invocation even with valid options. Both sides
+worker owns Windows serial handles, overlapped storage and the mutex. On
+macOS ARM64, serial discovery and access require private CT-specific authority
+issued inside the validated same-executable process-group worker (§8.7 of the
+platform appendix). Health, HID callbacks and ordinary in-process callers do not
+receive CT authority. The Windows callback also checks detached, one-process
+kill-on-close Job containment using the existing health diagnostic before native
+access, refusing a direct uncontained hidden worker invocation even with valid
+options. Both sides
 validate typed reports/failures, fixed privacy-safe strings, qualification and
 request-specific bounds. Framed JSON rejects duplicate keys before conversion
 to a generic value. No vendor executable, dependency or device code is used.
@@ -710,7 +719,8 @@ worker containment, driver cancellation or physical hardware acceptance.
 ### Windows selection and serial setup
 
 Native diagnostics require a disposable contained helper. Other OSes fail as
-unsupported platform. Cancellation before opening fails immediately.
+unsupported platform except for the macOS ARM64 path below. Cancellation before
+opening fails immediately.
 
 1. Acquire a non-inheritable per-user local named mutex preventing concurrent CT
    probes. Busy or abandoned ownership is refused; release abandoned ownership.
@@ -729,6 +739,41 @@ unsupported platform. Cancellation before opening fails immediately.
    byte; OS write timeout 1000 ms, with separate protocol deadlines.
 7. Subtract preparation time from total budget. Require at least 1000 ms remaining
    and capture within remainder. Otherwise configuration-stage timeout.
+
+### macOS ARM64 selection and serial setup
+
+This is an explicit diagnostic extension, not a production controller or a
+network-transport fallback. Use the OS-provided CDC ACM serial endpoint for the
+connected USB `2ec2:0003` device; never guess a port or accept a user-supplied
+device path.
+
+* Discover through IOKit. Require exactly one matching USB device and one
+  associated serial callout endpoint. Missing, incomplete or ambiguous evidence
+  fails closed. Retain native registry identities and verify the association
+  again after opening.
+* Keep cooperative ownership and OS serial exclusivity for the lifetime of the
+  open descriptor. Open only an existing character device, nonblocking,
+  close-on-exec, without a controlling terminal or symlink traversal.
+* Configure raw 8N1 with flow control disabled and nominal 256000 baud using
+  the native serial-speed API. Do not pulse DTR/RTS, discard incoming data or
+  claim electrical line-level evidence. Report only settings the native API
+  actually verifies; `serial_settings` remains null on macOS because its API
+  does not establish the Windows static DTR/RTS mode contract.
+* Bound nonblocking reads and writes by the same protocol deadlines and
+  cancellation checks. Set and verify `VMIN=1`, `VTIME=0` so an idle nonblocking
+  tty read yields `EAGAIN`, not a zero-byte result mistaken for disconnect.
+  Handle partial writes by exact suffix; never retry an uncertain native write.
+  Device removal, association changes, deadline expiry and cancellation are
+  explicit failures.
+* Keep descriptors and ownership inside the disposable worker. No blocking
+  drain, reconnect or in-process fallback may escape the supervision budget.
+  macOS process-group/watchdog limitations remain those in platform §8.7.
+
+The upgrade, query, capture, optional pattern, close, parsing and privacy
+contracts below are shared unchanged. The default probe sends protocol
+handshake/query/close bytes; it is **not** a zero-write probe. Display mutation
+still requires `--test-pattern`, and neither success nor an ACK is physical
+input/display qualification.
 
 ### Session sequence and wire output
 
@@ -1382,6 +1427,15 @@ Further scenarios:
 * Close failure records write-failed without replacing primary outcome.
 * Cancel racing completion at45 ms→cancelled, retain storage through completion.
   Permanently pending deadline20 ms→cleanup-pending around520 ms, retain handles.
+* macOS synthetic discovery rejects wrong USB identity, missing/multiple serial
+  endpoints and changed registry identity. Worker-scope tests reject direct,
+  health-only and stale CT authority. Synthetic native-I/O tests cover idle
+  reads, data transfer, hangup and polling cancellation without real hardware;
+  a real pseudo-terminal exercises tty idle/data/EOF, deadlines and cancellation;
+  shared protocol tests cover partial writes and interrupted sessions.
+* Seeded native preparation phases keep their own start times, even with a
+  zero-duration capture. Fast success and failure reports remain valid at the
+  worker boundary; preparation time is not counted twice.
 
 ### AKP03 decoding and image packets
 
