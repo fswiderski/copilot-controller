@@ -30,6 +30,12 @@ mod windows;
 #[cfg(all(windows, any(feature = "micro-hid", feature = "akp03-hid")))]
 pub(crate) use hid_scope::{HidWorkerCapability, hid_worker_capability};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use macos::CtWorkerCapability;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use macos::ct_probe_containment;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use macos::ct_worker_capability;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use macos::worker_health;
 #[cfg(all(
     target_os = "macos",

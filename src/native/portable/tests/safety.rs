@@ -148,6 +148,28 @@ fn macos_inventory_metadata_depends_on_the_matching_family_feature() {
 }
 
 #[test]
+fn serial_control_surface_inventory_stays_unintegrated_for_discovery_and_transport() {
+    let inventory = portable_inventory();
+    let serial = inventory
+        .devices()
+        .iter()
+        .find(|device| device.class == DeviceClass::SerialControlSurface)
+        .unwrap();
+    assert_eq!(
+        serial.discovery,
+        Support::Unavailable {
+            reason: "device_backend_not_integrated"
+        }
+    );
+    assert_eq!(
+        serial.diagnostic_transport,
+        Support::Unavailable {
+            reason: "device_backend_not_integrated"
+        }
+    );
+}
+
+#[test]
 fn positive_evidence_cannot_promote_diagnostic_flags() {
     let evidence = process();
     let inventory = ProcessInventory::new(

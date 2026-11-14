@@ -1,11 +1,15 @@
 use std::{
     cell::Cell,
+    ffi::OsStr,
     fs::File,
     io::{self, Cursor, Read, Write},
+    marker::PhantomData,
     os::unix::{
+        ffi::OsStrExt,
         io::{FromRawFd, IntoRawFd},
         process::CommandExt,
     },
+    path::Path,
     process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         Arc,
@@ -17,7 +21,7 @@ use std::{
 };
 
 #[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
-use std::{ffi::OsStr, marker::PhantomData, os::unix::ffi::OsStrExt, path::Path, rc::Rc};
+use std::rc::Rc;
 
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -39,14 +43,22 @@ static SUPERVISOR: SupervisorGate = SupervisorGate::new();
 
 thread_local! {
     // Set only while the fully validated hidden request's callback is running.
-    static WORKER_SCOPE: Cell<Option<(bool, Uuid)>> = const { Cell::new(None) };
+    static WORKER_SCOPE: Cell<Option<(ScopeAuthority, Uuid)>> = const { Cell::new(None) };
     static WATCHDOG_PARENT: Cell<Option<WorkerIdentity>> = const { Cell::new(None) };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScopeAuthority {
+    Health,
+    HidHealth,
+    HidLive,
+    CtSerialProbe,
 }
 
 struct WorkerScope;
 
 impl WorkerScope {
-    fn enter(live_hid: bool) -> Result<Self, Kind> {
+    fn enter(authority: ScopeAuthority) -> Result<Self, Kind> {
         verify_containment()?;
         let parent = WATCHDOG_PARENT.with(Cell::get).ok_or(Kind::Containment)?;
         if !parent_alive(parent) {
@@ -56,7 +68,7 @@ impl WorkerScope {
             if scope.get().is_some() {
                 return Err(Kind::Containment);
             }
-            scope.set(Some((live_hid, Uuid::new_v4())));
+            scope.set(Some((authority, Uuid::new_v4())));
             Ok(Self)
         })
     }
@@ -81,7 +93,7 @@ pub(crate) struct HidWorkerCapability {
 #[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
 impl HidWorkerCapability {
     pub(crate) fn valid(&self) -> bool {
-        WORKER_SCOPE.with(|scope| scope.get() == Some((true, self.scope_nonce)))
+        WORKER_SCOPE.with(|scope| scope.get() == Some((ScopeAuthority::HidLive, self.scope_nonce)))
             && unsafe { libc::getpid() } == self.pid
             && verify_containment().is_ok()
             && WATCHDOG_PARENT.with(Cell::get) == Some(self.parent)
@@ -92,9 +104,12 @@ impl HidWorkerCapability {
 
 #[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
 pub(crate) fn hid_worker_capability() -> Option<HidWorkerCapability> {
-    let (live_hid, scope_nonce) = WORKER_SCOPE.with(Cell::get)?;
+    let (authority, scope_nonce) = WORKER_SCOPE.with(Cell::get)?;
     let parent = WATCHDOG_PARENT.with(Cell::get)?;
-    if !live_hid || verify_containment().is_err() || verify_supervisor_parent().is_err() {
+    if authority != ScopeAuthority::HidLive
+        || verify_containment().is_err()
+        || verify_supervisor_parent().is_err()
+    {
         return None;
     }
     if !parent_alive(parent) {
@@ -106,6 +121,55 @@ pub(crate) fn hid_worker_capability() -> Option<HidWorkerCapability> {
         parent,
         _thread_bound: PhantomData,
     })
+}
+
+#[derive(Clone)]
+pub(crate) struct CtWorkerCapability {
+    pid: libc::pid_t,
+    scope_nonce: Uuid,
+    parent: WorkerIdentity,
+    _thread_bound: PhantomData<*const ()>,
+}
+
+impl CtWorkerCapability {
+    pub(crate) fn valid(&self) -> bool {
+        WORKER_SCOPE
+            .with(|scope| scope.get() == Some((ScopeAuthority::CtSerialProbe, self.scope_nonce)))
+            && unsafe { libc::getpid() } == self.pid
+            && verify_containment().is_ok()
+            && WATCHDOG_PARENT.with(Cell::get) == Some(self.parent)
+            && parent_alive(self.parent)
+            && verify_supervisor_parent().is_ok()
+    }
+}
+
+pub(crate) fn ct_worker_capability() -> Option<CtWorkerCapability> {
+    let (authority, scope_nonce) = WORKER_SCOPE.with(Cell::get)?;
+    let parent = WATCHDOG_PARENT.with(Cell::get)?;
+    if authority != ScopeAuthority::CtSerialProbe
+        || verify_containment().is_err()
+        || verify_supervisor_parent().is_err()
+    {
+        return None;
+    }
+    if !parent_alive(parent) {
+        return None;
+    }
+    Some(CtWorkerCapability {
+        pid: unsafe { libc::getpid() },
+        scope_nonce,
+        parent,
+        _thread_bound: PhantomData,
+    })
+}
+
+pub(crate) fn ct_probe_containment() -> Result<(), DiagnosticCallbackError> {
+    let capability = ct_worker_capability().ok_or(DiagnosticCallbackError)?;
+    if capability.valid() {
+        Ok(())
+    } else {
+        Err(DiagnosticCallbackError)
+    }
 }
 
 pub(crate) fn worker_health() -> Result<Value, DiagnosticCallbackError> {
@@ -135,6 +199,17 @@ pub(super) fn validate_platform_request(request: &DiagnosticRequest) -> Result<D
             request.kind == "micro_hid_probe",
         )
         .map_err(|_| Kind::InvalidRequest),
+        "ct_serial_probe" => {
+            let options: crate::devices::ct::probe::Options =
+                serde_json::from_value(request.payload.clone())
+                    .map_err(|_| Kind::InvalidRequest)?;
+            options.validate().map_err(|_| Kind::InvalidRequest)?;
+            Ok(Duration::from_millis(
+                u64::from(options.total_timeout_ms)
+                    + 2_000
+                    + u64::from(options.io_timeout_ms.min(250)),
+            ))
+        }
         _ => Err(Kind::UnsupportedPlatform),
     }
 }
@@ -157,7 +232,6 @@ fn verify_containment() -> Result<(), Kind> {
     Ok(())
 }
 
-#[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
 fn verify_supervisor_parent() -> Result<(), Kind> {
     let parent = unsafe { libc::getppid() };
     if parent <= 1 {
@@ -176,7 +250,6 @@ fn verify_supervisor_parent() -> Result<(), Kind> {
     same_executable_paths(Path::new(OsStr::from_bytes(&path[..length])), &executable)
 }
 
-#[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
 fn same_executable_paths(parent: &Path, current: &Path) -> Result<(), Kind> {
     let parent = parent.canonicalize().map_err(|_| Kind::Containment)?;
     let current = current.canonicalize().map_err(|_| Kind::Containment)?;
@@ -379,9 +452,19 @@ pub(super) fn worker_main(allowlist: &DiagnosticAllowlist) -> Result<(), WorkerE
         let callback = allowlist
             .find(&envelope.request.kind)
             .ok_or(Kind::InvalidRequest)?;
-        let live_hid =
-            envelope.request.kind != "health" && envelope.request.payload["health_check"] == false;
-        let _scope = WorkerScope::enter(live_hid)?;
+        let authority = match envelope.request.kind.as_str() {
+            "health" => ScopeAuthority::Health,
+            "ct_serial_probe" => ScopeAuthority::CtSerialProbe,
+            "micro_hid_probe" | "akp03_hid_probe" => {
+                if envelope.request.payload["health_check"] == false {
+                    ScopeAuthority::HidLive
+                } else {
+                    ScopeAuthority::HidHealth
+                }
+            }
+            _ => return Err(Kind::InvalidRequest),
+        };
+        let _scope = WorkerScope::enter(authority)?;
         let outcome = protocol::invoke_callback(callback, envelope.request.payload);
         let frame = protocol::encode_response(&outcome, envelope.request_nonce, worker)?;
         stdout.write_all(&frame).map_err(|_| Kind::Transport)

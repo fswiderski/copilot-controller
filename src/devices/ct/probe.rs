@@ -916,9 +916,9 @@ fn run_with_evidence<T: Transport>(
     let started_at = transport.progress_origin_ms().unwrap_or(start);
     progress.record.port_opened_at_ms = transport.port_opened_at_ms();
     progress.record.port_configured_at_ms = transport.port_configured_at_ms();
+    progress.phase_started = started_at;
     progress.seed(transport.initial_phases());
     let deadline = start.saturating_add(u64::from(options.total_timeout_ms));
-    progress.phase_started = started_at;
     let mut engine = Engine {
         transport,
         options,
@@ -1653,7 +1653,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
     #[test]
     fn native_entry_point_is_typed_unsupported_without_discovery() {
         let failure = run_native(Options::default(), &AtomicBool::new(false)).unwrap_err();
@@ -1763,7 +1763,7 @@ fn pattern_pixels(display: u8) -> Vec<u8> {
     pixels
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
 pub fn run_native(_options: Options, _cancelled: &AtomicBool) -> Result<ProbeReport, ProbeFailure> {
     let progress = Progress::new(Evidence::NativeTransportObservation).record;
     if let Err(kind) = _options.validate() {
@@ -1794,10 +1794,21 @@ pub fn run_native(_options: Options, _cancelled: &AtomicBool) -> Result<ProbeRep
 #[cfg(windows)]
 mod windows_native;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod macos_native;
+
 #[cfg(windows)]
 pub(crate) fn run_native(
     options: Options,
     cancelled: &AtomicBool,
 ) -> Result<ProbeReport, ProbeFailure> {
     windows_native::run_native(options, cancelled)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn run_native(
+    options: Options,
+    cancelled: &AtomicBool,
+) -> Result<ProbeReport, ProbeFailure> {
+    macos_native::run_native(options, cancelled)
 }

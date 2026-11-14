@@ -56,10 +56,10 @@ Usage: copilot-controller <command>
   ct-probe [--schema-version 1] [--total-timeout-ms <1000..8000>]
            [--io-timeout-ms <100..1500>] [--capture-ms <0..5000>]
            [--max-events <1..128>] [--max-received-bytes <256..32768>]
-           [--test-pattern] (explicit contained Windows serial diagnostic)
+           [--test-pattern] (explicit contained serial diagnostic)
 
 All previews and probes are not ready or hardware-qualified. Native probes use
-contained Windows workers or macOS ARM64 HID workers. CT remains Windows-only.
+contained Windows workers or macOS ARM64 workers.
 HID capture defaults to 2000 ms. Micro keymap
 and LED test require --query; AKP03 display test requires --initialize.
 --health-check conflicts with these opt-ins and performs no device access.
@@ -355,7 +355,7 @@ fn profile_report(device: DeviceKind) -> Value {
         "prioritized_roles": profile.prioritized_controls(),
         "command_ready": false,
         "runtime_qualified": false,
-        "blockers": [if device == DeviceKind::Ct && cfg!(windows) {
+        "blockers": [if device == DeviceKind::Ct && (cfg!(windows) || cfg!(all(target_os = "macos", target_arch = "aarch64"))) {
                         "explicit_probe_required"
                     } else {
                         "native_backend_unavailable"
@@ -365,6 +365,8 @@ fn profile_report(device: DeviceKind) -> Value {
 }
 
 fn capabilities() -> Value {
+    let ct_serial_probe_available =
+        cfg!(windows) || cfg!(all(target_os = "macos", target_arch = "aarch64"));
     json!({
         "schema": 1,
         "read_only": true,
@@ -372,8 +374,8 @@ fn capabilities() -> Value {
         "qualification": "foundation_only",
         "inventory": portable_inventory(),
         "offline_codecs": ["micro", "akp03-original", "akp03e-rev2", "ct-pid-0003"],
-        "hardware_backend_available": cfg!(windows) || cfg!(all(target_os = "macos", target_arch = "aarch64", any(feature = "micro-hid", feature = "akp03-hid"))),
-        "ct_serial_probe_available": cfg!(windows),
+        "hardware_backend_available": ct_serial_probe_available || cfg!(all(target_os = "macos", target_arch = "aarch64", any(feature = "micro-hid", feature = "akp03-hid"))),
+        "ct_serial_probe_available": ct_serial_probe_available,
         "micro_hid_probe_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "micro-hid")),
         "akp03_hid_probe_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "akp03-hid")),
         "firmware_execution_available": false,
@@ -385,7 +387,7 @@ fn capabilities() -> Value {
             "micro_hid": cfg!(feature = "micro-hid"),
             "micro_firmware": cfg!(feature = "micro-firmware"),
         },
-        "limitations": ["Availability is compile-time support, not native evidence or hardware acceptance. Native CLI probing requires explicit opt-in and a contained Windows or macOS ARM64 worker; CT remains Windows-only.",
+        "limitations": ["Availability is compile-time support, not native evidence or hardware acceptance. Native CLI probing requires explicit opt-in and a contained Windows or macOS ARM64 worker.",
             "Micro/AKP03 live probes fail closed without device-specific features and exact native descriptor evidence. Windows HID bus properties are optional; exact interface numbers and raw descriptors remain unavailable. Windows HID requires a private contained-child capability. macOS has a child-side parent-lifetime watchdog, not kernel-enforced parent-death/escape containment; IOKit requires a private child capability and canonical same-executable parent.",
             "Micro/AKP03 health checks perform no device access and do not require HID features."],
     })

@@ -43,6 +43,7 @@ fn inventory_and_doctor_are_truthful_and_never_action_ready() {
     assert_eq!(
         capabilities["hardware_backend_available"],
         cfg!(windows)
+            || cfg!(all(target_os = "macos", target_arch = "aarch64"))
             || cfg!(all(
                 target_os = "macos",
                 target_arch = "aarch64",
@@ -65,7 +66,10 @@ fn inventory_and_doctor_are_truthful_and_never_action_ready() {
             feature = "akp03-hid"
         ))
     );
-    assert_eq!(capabilities["ct_serial_probe_available"], cfg!(windows));
+    assert_eq!(
+        capabilities["ct_serial_probe_available"],
+        cfg!(windows) || cfg!(all(target_os = "macos", target_arch = "aarch64"))
+    );
     assert_eq!(capabilities["firmware_execution_available"], false);
     assert_eq!(capabilities["runtime_owner_acquired"], false);
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -369,7 +373,7 @@ fn ct_validation_and_hidden_worker_never_emit_success_output() {
         assert!(output.stdout.is_empty(), "{args:?}");
         assert!(!output.stderr.is_empty(), "{args:?}");
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
     {
         let output = invoke(&["ct-probe", "--capture-ms", "0"]);
         assert!(!output.status.success());
