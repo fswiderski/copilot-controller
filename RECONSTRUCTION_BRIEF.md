@@ -81,7 +81,7 @@ Commit the toolchain selection and lockfile, and support:
 | Pure engine, encoders, decoders, JSON/SVG previews | Yes | Yes | Yes |
 | Native observations | Platform-specific, with explicit limitations | Platform-specific, with explicit limitations | Platform-specific, with explicit limitations |
 | Micro and AKP03 HID metadata/probes | Optional worker-only metadata; live probes fail closed on missing exact evidence | Optional feature | Unavailable, even when feature selected |
-| CT serial probe | Native implementation | Unavailable | Unavailable |
+| CT serial probe | Native implementation | Bounded diagnostic, ARM64 only | Unavailable |
 | Micro firmware update | Unavailable | Optional feature, ARM64 only | Unavailable |
 | Safe persistent state and cooperative owner | Fixed local disk | Local APFS | Local ext-family, XFS, Btrfs |
 
@@ -161,8 +161,10 @@ ordinary public in-process native access fails closed. Health constructs no HID
 backend. macOS native evidence remains unverified on hardware, and process groups
 use a child-side parent-lifetime watchdog, not a kernel-enforced parent-death or
 escape guarantee; whole-process suspension and OS/driver stalls remain outside
-its guarantee. CT stays Windows-only; Linux live
-probing remains unavailable. See platform appendix §8.7 for cleanup/fencing.
+its guarantee. CT also uses the macOS ARM64 worker for an explicitly invoked,
+bounded serial diagnostic; the worker alone may discover and open the uniquely
+associated USB serial endpoint. Linux live probing remains unavailable. See
+platform appendix §8.7 for cleanup/fencing.
 State snapshots/recovery and shared
 authority-anchor ownership are explicit library-only APIs; no CLI route invokes
 them. No native updater is wired. No probe is action-ready or physically

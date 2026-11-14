@@ -80,7 +80,7 @@ fn run(mode: &str, micro: bool) -> Result<DiagnosticResult, WorkerError> {
 #[test]
 fn macos_parent_admission_rejects_ct_unknown_and_invalid_hid_options_without_spawn() {
     for (kind, payload, expected) in [
-        ("ct_serial_probe", Value::Null, Kind::UnsupportedPlatform),
+        ("ct_serial_probe", Value::Null, Kind::InvalidRequest),
         ("command", Value::Null, Kind::UnsupportedPlatform),
         ("micro_hid_probe", json!({}), Kind::InvalidRequest),
         (
@@ -122,8 +122,14 @@ fn macos_parent_admission_rejects_ct_unknown_and_invalid_hid_options_without_spa
         &registry,
     )
     .unwrap_err();
-    assert_eq!(error.kind, Kind::UnsupportedPlatform);
+    assert_eq!(error.kind, Kind::InvalidRequest);
     assert!(error.worker.is_none());
+    let budget = validate_platform_request(&DiagnosticRequest {
+        kind: "ct_serial_probe".into(),
+        payload: serde_json::to_value(crate::devices::ct::probe::Options::default()).unwrap(),
+    })
+    .unwrap();
+    assert_eq!(budget, Duration::from_millis(10_250));
 }
 
 #[test]
@@ -313,6 +319,7 @@ fn isolated(test: &str) {
 #[test]
 fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
     assert!(hid_worker_capability().is_none());
+    assert!(ct_worker_capability().is_none());
     assert!(worker_health().is_err());
     for (route, allowlist) in [
         (
@@ -329,6 +336,7 @@ fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
             .unwrap_err();
         assert_eq!(error.kind, Kind::Containment);
     }
+
     #[cfg(any(feature = "micro-hid", feature = "akp03-hid"))]
     assert!(matches!(
         crate::native::hid::native_backend(),
@@ -336,6 +344,34 @@ fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
             crate::native::hid::UnavailableReason::UnsupervisedAccess
         ))
     ));
+}
+
+#[test]
+fn macos_ct_scope_is_private_and_never_grants_hid_authority() {
+    const TEST: &str = "macos_ct_scope_is_private_and_never_grants_hid_authority";
+    if std::env::var("MACOS_WORKER_ISOLATED").as_deref() != Ok(TEST) {
+        isolated(TEST);
+        return;
+    }
+    {
+        let _watchdog = ParentWatchdog::start().unwrap();
+        let _health = WorkerScope::enter(ScopeAuthority::Health).unwrap();
+        assert!(ct_worker_capability().is_none());
+        assert!(hid_worker_capability().is_none());
+    }
+    {
+        let _watchdog = ParentWatchdog::start().unwrap();
+        let _ct = WorkerScope::enter(ScopeAuthority::CtSerialProbe).unwrap();
+        let capability = ct_worker_capability().unwrap();
+        assert!(capability.valid());
+        assert!(hid_worker_capability().is_none());
+    }
+    {
+        let _watchdog = ParentWatchdog::start().unwrap();
+        let _hid = WorkerScope::enter(ScopeAuthority::HidLive).unwrap();
+        assert!(ct_worker_capability().is_none());
+        assert!(hid_worker_capability().is_some());
+    }
 }
 
 #[test]
@@ -349,7 +385,7 @@ fn macos_write_capability_is_scoped_health_denied_and_native_output_uses_the_gat
     assert!(hid_worker_capability().is_none());
     {
         let _watchdog = ParentWatchdog::start().unwrap();
-        let _health = WorkerScope::enter(false).unwrap();
+        let _health = WorkerScope::enter(ScopeAuthority::HidHealth).unwrap();
         assert!(worker_health().is_ok());
         assert!(hid_worker_capability().is_none());
         #[cfg(any(feature = "micro-hid", feature = "akp03-hid"))]
@@ -363,7 +399,7 @@ fn macos_write_capability_is_scoped_health_denied_and_native_output_uses_the_gat
     let capability;
     {
         let _watchdog = ParentWatchdog::start().unwrap();
-        let _live = WorkerScope::enter(true).unwrap();
+        let _live = WorkerScope::enter(ScopeAuthority::HidLive).unwrap();
         capability = hid_worker_capability().unwrap();
         assert!(capability.valid());
         #[cfg(any(feature = "micro-hid", feature = "akp03-hid"))]
@@ -385,7 +421,7 @@ fn macos_write_capability_is_scoped_health_denied_and_native_output_uses_the_gat
     assert!(!capability.valid());
     {
         let _watchdog = ParentWatchdog::start().unwrap();
-        let _next = WorkerScope::enter(true).unwrap();
+        let _next = WorkerScope::enter(ScopeAuthority::HidLive).unwrap();
         assert!(
             !capability.valid(),
             "a later request must not revive the old capability"

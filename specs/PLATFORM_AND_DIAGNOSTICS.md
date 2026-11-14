@@ -127,8 +127,8 @@ an explicitly opted-in supervised HID probe, not that discovery ran.
 Disabled-family diagnostic transport retains reason `device_backend_not_integrated`.
 The original alternate profile stays discovery-unavailable with that reason and
 diagnostic-unavailable with `decode_only_original_profile` in every build.
-The serial row stays unavailable with `device_backend_not_integrated`. Windows
-and Linux neutral device-inventory rows are unchanged; Windows CT CLI availability
+The neutral serial row stays unavailable with `device_backend_not_integrated`.
+Windows and Linux neutral device-inventory rows are unchanged; Windows/macOS ARM64 CT CLI availability
 is reported separately as `ct_serial_probe_available`, not inferred from these
 rows. `micro-firmware` does not enable HID metadata or probing.
 
@@ -725,9 +725,9 @@ receive no HID authority; native access and stale scopes are checked as in
 §2.5. Optional bounded native ancestry metadata does not make Windows live
 probes available: interface-number/raw-descriptor gates still fail closed.
 macOS ARM64 additionally admits only health,
-Micro and AKP03 requests (§8.7), validating complete typed HID options before
+CT, Micro and AKP03 requests (§8.7), validating complete typed diagnostic options before
 spawn. Other non-Windows targets return unsupported-platform after these checks
-without invoking callbacks. CT remains Windows-only.
+without invoking callbacks.
 
 ### 8.2 Exact framing
 
@@ -892,7 +892,7 @@ Failure precedence matters:
 - Stdout `not-a-frame` -> `frame_limit`, as first four bytes decode as excessive length.
 - Nonzero exit -> `worker_failed` only once required pipe results/drain are available; earlier transport/protocol failures can win.
 
-### 8.7 macOS ARM64 HID/health platform block
+### 8.7 macOS ARM64 CT/HID/health platform block
 
 The existing Rust executable uses the exact hidden `__probe-worker` and
 AKP03-only `__akp03-worker` routes, the same static registries, protocol version,
@@ -900,8 +900,9 @@ AKP03-only `__akp03-worker` routes, the same static registries, protocol version
 limit. Hidden routing rejects extra arguments. Parent and child both reject
 unsupported kinds and malformed/unknown/missing typed options; the child also
 requires one entire frame and EOF, rejects duplicate JSON keys, and rechecks
-the route's allowlist before invoking any callback. No CT or Linux live route
-is added.
+the route's allowlist before invoking any callback. The shared route admits the
+bounded `ct_serial_probe` diagnostic with its typed options; the AKP03-only route
+still cannot invoke CT. Linux live routes remain unavailable.
 
 The parent spawns only `current_exe` with `process_group(0)` and three pipes.
 It verifies child PGID == PID and retains the native `proc_bsdinfo` PID/start
@@ -913,7 +914,9 @@ Nonblocking parent I/O pumps bounded stdin, stdout and discarded stderr without
 I/O threads, polling every 5 ms. Deadline includes spawn, input, callback,
 response, EOF and exit observation. Micro deadlines are capture+20000 ms,
 another 5000 ms for keymap; AKP03 is capture+15000 ms; health is 3000 ms.
-A caller may shorten but not extend these device-spec budgets. Success requires
+A CT caller is bounded by its existing total/I/O options and supervision
+allowance in display-device §6. A caller may shorten but not extend these
+device-spec budgets. Success requires
 complete send, both output EOFs, valid correlated outcome, zero exit and cleanup.
 
 On failure, timeout, cancellation or output overflow, reuse the Unix group
@@ -946,7 +949,11 @@ into worker failure while those deadlines remain satisfied; success still
 requires zero exit and confirmed process/I/O cleanup.
 
 Only after full request validation and watchdog startup can the child establish
-a private thread-bound, per-request HID capability. Native access additionally
+a private thread-bound, per-request capability for its diagnostic kind. CT
+serial authority and HID authority are separate: neither can authorize the
+other, and health receives neither. CT checks its authority before native
+discovery/open/configuration/read/write; the callback's scope ends before the
+worker response is sent. Native access additionally
 requires the parent process image path and current executable path to
 canonicalize successfully and match. Ordinary in-process `native_backend()` calls fail with typed
 `UnsupervisedAccess`; health gets no HID capability and never constructs a
@@ -973,7 +980,7 @@ after SIGINT/SIGKILL of the parent, and exercise held pipes and truncated
 response headers/bodies. No hardware was accessed.
 IOKit property/descriptor and physical input/output behavior remain unverified.
 Standalone doctor discovery remains unavailable; diagnostic metadata is obtained
-only inside the explicit HID probe child. Windows uses the separate Job
+only inside the explicit CT or HID probe child. Windows uses the separate Job
 service, not this process-group block. Its HID backend now requires the
 private validated live-child scope described in §2.5/§8.1, retains bounded
 native bus ancestry and rejects incomplete enumeration. The underlying Job
