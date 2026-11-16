@@ -108,6 +108,20 @@ fn invalid_public_and_programmatic_options_never_launch_workers() {
         &["--query", "--rainbow-backlight", "--test-pattern"],
         &["--query", "--rainbow-backlight", "--rainbow-slot", "1"],
         &["--query", "--rainbow-backlight", "--health-check"],
+        &["--backlight-test"],
+        &["--backlight-test", "rgb"],
+        &["--query", "--backlight-test", "nope"],
+        &[
+            "--query",
+            "--backlight-test",
+            "rgb",
+            "--backlight-test",
+            "red",
+        ],
+        &["--query", "--backlight-test", "rgb", "--test-pattern"],
+        &["--query", "--backlight-test", "rgb", "--rainbow-slot", "1"],
+        &["--query", "--backlight-test", "rgb", "--rainbow-backlight"],
+        &["--query", "--backlight-test", "rgb", "--health-check"],
         &["--query", "--query"],
         &["--query", "--health-check"],
         &["--query", "--read-keymap", "--health-check"],
@@ -152,6 +166,10 @@ fn invalid_public_and_programmatic_options_never_launch_workers() {
             ..Default::default()
         }),
         Options::Micro(micro::MicroProbeOptions {
+            backlight_test: Some(micro::BacklightTestMode::Rgb),
+            ..Default::default()
+        }),
+        Options::Micro(micro::MicroProbeOptions {
             query: true,
             test_pattern: true,
             rainbow_slot: Some(1),
@@ -161,6 +179,18 @@ fn invalid_public_and_programmatic_options_never_launch_workers() {
             query: true,
             test_pattern: true,
             rainbow_backlight: true,
+            ..Default::default()
+        }),
+        Options::Micro(micro::MicroProbeOptions {
+            query: true,
+            test_pattern: true,
+            backlight_test: Some(micro::BacklightTestMode::Rgb),
+            ..Default::default()
+        }),
+        Options::Micro(micro::MicroProbeOptions {
+            query: true,
+            rainbow_backlight: true,
+            backlight_test: Some(micro::BacklightTestMode::Rgb),
             ..Default::default()
         }),
         Options::Micro(micro::MicroProbeOptions {
@@ -201,7 +231,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             22_000,
             json!({
                 "capture_ms": 2000, "query": false, "read_keymap": false,
-                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false, "exclusive_check": false,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "backlight_test": null, "health_check": false, "exclusive_check": false,
             }),
         ),
         (
@@ -225,7 +255,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             55_000,
             json!({
                 "capture_ms": 30000, "query": true, "read_keymap": true,
-                "test_pattern": true, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false, "exclusive_check": false,
+                "test_pattern": true, "rainbow_slot": null, "rainbow_backlight": false, "backlight_test": null, "health_check": false, "exclusive_check": false,
             }),
         ),
         (
@@ -234,7 +264,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             56_000,
             json!({
                 "capture_ms": 0, "query": true, "read_keymap": false,
-                "test_pattern": false, "rainbow_slot": 6, "rainbow_backlight": false, "health_check": false, "exclusive_check": false,
+                "test_pattern": false, "rainbow_slot": 6, "rainbow_backlight": false, "backlight_test": null, "health_check": false, "exclusive_check": false,
             }),
         ),
         (
@@ -243,7 +273,31 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             56_000,
             json!({
                 "capture_ms": 0, "query": true, "read_keymap": false,
-                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": true, "health_check": false, "exclusive_check": false,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": true, "backlight_test": null, "health_check": false, "exclusive_check": false,
+            }),
+        ),
+        (
+            true,
+            vec![
+                "--query",
+                "--backlight-test",
+                "brightness",
+                "--capture-ms",
+                "0",
+            ],
+            57_750,
+            json!({
+                "capture_ms": 0, "query": true, "read_keymap": false,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "backlight_test": "brightness", "health_check": false, "exclusive_check": false,
+            }),
+        ),
+        (
+            true,
+            vec!["--query", "--backlight-test", "red", "--capture-ms", "0"],
+            57_000,
+            json!({
+                "capture_ms": 0, "query": true, "read_keymap": false,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "backlight_test": "red", "health_check": false, "exclusive_check": false,
             }),
         ),
         (
@@ -261,7 +315,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             20_000,
             json!({
                 "capture_ms": 0, "query": false, "read_keymap": false,
-                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false, "exclusive_check": false,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "backlight_test": null, "health_check": false, "exclusive_check": false,
             }),
         ),
         (
@@ -279,7 +333,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             3_000,
             json!({
                 "capture_ms": 30000, "query": false, "read_keymap": false,
-                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": true, "exclusive_check": false,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "backlight_test": null, "health_check": true, "exclusive_check": false,
             }),
         ),
         (
@@ -288,7 +342,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             5_000,
             json!({
                 "capture_ms": 0, "query": false, "read_keymap": false,
-                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false, "exclusive_check": true,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "backlight_test": null, "health_check": false, "exclusive_check": true,
             }),
         ),
         (
@@ -339,8 +393,22 @@ fn rainbow_slot_parser_requires_query_and_rejects_bounds_or_conflicts() {
         args(&["--query", "--rainbow-backlight", "--test-pattern"]),
         args(&["--query", "--rainbow-backlight", "--health-check"]),
         args(&["--query", "--rainbow-backlight", "--rainbow-slot", "2"]),
+        args(&["--backlight-test", "rgb"]),
+        args(&["--query", "--backlight-test", "x"]),
+        args(&["--query", "--backlight-test", "rgb", "--test-pattern"]),
+        args(&["--query", "--backlight-test", "rgb", "--health-check"]),
+        args(&["--query", "--backlight-test", "rgb", "--rainbow-slot", "2"]),
+        args(&["--query", "--backlight-test", "rgb", "--rainbow-backlight"]),
     ] {
         assert!(parse(&invalid, true).is_err(), "{invalid:?}");
+    }
+}
+
+#[test]
+fn backlight_test_parser_accepts_exact_modes() {
+    for mode in ["rgb", "red", "green", "blue", "gray", "brightness"] {
+        let options = parse(&args(&["--query", "--backlight-test", mode]), true).unwrap();
+        assert_eq!(options.payload().unwrap()["backlight_test"], json!(mode));
     }
 }
 
@@ -388,6 +456,9 @@ fn callback_requires_complete_strict_options_before_containment_or_native_access
             let mut dependent = options_payload(true);
             dependent["rainbow_backlight"] = json!(true);
             cases.push(dependent);
+            let mut dependent = options_payload(true);
+            dependent["backlight_test"] = json!("rgb");
+            cases.push(dependent);
             let mut conflict = options_payload(true);
             conflict["query"] = json!(true);
             conflict["rainbow_slot"] = json!(1);
@@ -397,6 +468,21 @@ fn callback_requires_complete_strict_options_before_containment_or_native_access
             conflict["query"] = json!(true);
             conflict["rainbow_backlight"] = json!(true);
             conflict["test_pattern"] = json!(true);
+            cases.push(conflict);
+            let mut conflict = options_payload(true);
+            conflict["query"] = json!(true);
+            conflict["backlight_test"] = json!("rgb");
+            conflict["test_pattern"] = json!(true);
+            cases.push(conflict);
+            let mut conflict = options_payload(true);
+            conflict["query"] = json!(true);
+            conflict["backlight_test"] = json!("rgb");
+            conflict["rainbow_backlight"] = json!(true);
+            cases.push(conflict);
+            let mut conflict = options_payload(true);
+            conflict["query"] = json!(true);
+            conflict["backlight_test"] = json!("rgb");
+            conflict["rainbow_slot"] = json!(1);
             cases.push(conflict);
         }
         for payload in cases {

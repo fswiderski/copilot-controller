@@ -332,7 +332,7 @@ fn hid_registries_have_kind_only_authority_and_named_route_is_private() {
 #[test]
 fn framed_hid_options_reject_duplicate_keys_before_callback_admission() {
     for body in [
-        br#"{"version":1,"request_nonce":"11111111-1111-4111-8111-111111111111","request":{"kind":"micro_hid_probe","payload":{"capture_ms":0,"query":false,"query":true,"read_keymap":false,"test_pattern":false,"rainbow_slot":null,"rainbow_backlight":false,"health_check":false,"exclusive_check":false}}}"#.as_slice(),
+        br#"{"version":1,"request_nonce":"11111111-1111-4111-8111-111111111111","request":{"kind":"micro_hid_probe","payload":{"capture_ms":0,"query":false,"query":true,"read_keymap":false,"test_pattern":false,"rainbow_slot":null,"rainbow_backlight":false,"backlight_test":null,"health_check":false,"exclusive_check":false}}}"#.as_slice(),
         br#"{"version":1,"request_nonce":"11111111-1111-4111-8111-111111111111","request":{"kind":"akp03_hid_probe","payload":{"capture_ms":0,"initialize":false,"initialize":true,"test_pattern":false,"health_check":false}}}"#.as_slice(),
     ] {
         assert!(matches!(
