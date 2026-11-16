@@ -24,12 +24,33 @@ fn success(options: &Options) -> Outcome {
             probe_succeeded: true,
             read_only: !options.query,
             report: micro::Progress {
-                phase: "complete".into(),
+                phase: if options.exclusive_check {
+                    "exclusive_open_check".into()
+                } else {
+                    "complete".into()
+                },
                 opened: true,
                 descriptor_verified: true,
+                candidate: options.exclusive_check.then_some(micro::Candidate {
+                    vendor_id: crate::devices::micro::enumeration::APPLICATION_VID,
+                    product_id: crate::devices::micro::enumeration::APPLICATION_PID,
+                    usage_page: crate::devices::micro::enumeration::USAGE_PAGE,
+                    usage: crate::devices::micro::enumeration::USAGE,
+                    interface_number: Some(2),
+                    transport: "usb".into(),
+                }),
                 output_attempts: usize::from(options.query),
                 ..Default::default()
             },
+            exclusive_open: options
+                .exclusive_check
+                .then_some(micro::ExclusiveOpenCheck {
+                    requested: true,
+                    acquired: true,
+                    released: true,
+                    open_code: 0,
+                    close_code: Some(0),
+                }),
             ..Default::default()
         }),
         Options::Akp03(options) => Outcome::Akp03(akp03::Akp03ProbeResult {
@@ -91,6 +112,14 @@ fn invalid_public_and_programmatic_options_never_launch_workers() {
         &["--query", "--health-check"],
         &["--query", "--read-keymap", "--health-check"],
         &["--query", "--test-pattern", "--health-check"],
+        &["--exclusive-check", "--query"],
+        &["--exclusive-check", "--read-keymap"],
+        &["--exclusive-check", "--test-pattern"],
+        &["--exclusive-check", "--rainbow-slot", "1"],
+        &["--exclusive-check", "--rainbow-backlight"],
+        &["--exclusive-check", "--health-check"],
+        &["--exclusive-check", "--capture-ms", "1"],
+        &["--exclusive-check", "--exclusive-check"],
         &["--initialize"],
     ];
     let akp03_only: &[&[&str]] = &[
@@ -138,6 +167,16 @@ fn invalid_public_and_programmatic_options_never_launch_workers() {
             capture_ms: 30_001,
             ..Default::default()
         }),
+        Options::Micro(micro::MicroProbeOptions {
+            exclusive_check: true,
+            query: true,
+            ..Default::default()
+        }),
+        Options::Micro(micro::MicroProbeOptions {
+            exclusive_check: true,
+            capture_ms: 1,
+            ..Default::default()
+        }),
         Options::Akp03(akp03::Akp03ProbeOptions {
             test_pattern: true,
             ..Default::default()
@@ -162,7 +201,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             22_000,
             json!({
                 "capture_ms": 2000, "query": false, "read_keymap": false,
-                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false, "exclusive_check": false,
             }),
         ),
         (
@@ -186,7 +225,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             55_000,
             json!({
                 "capture_ms": 30000, "query": true, "read_keymap": true,
-                "test_pattern": true, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false,
+                "test_pattern": true, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false, "exclusive_check": false,
             }),
         ),
         (
@@ -195,7 +234,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             56_000,
             json!({
                 "capture_ms": 0, "query": true, "read_keymap": false,
-                "test_pattern": false, "rainbow_slot": 6, "rainbow_backlight": false, "health_check": false,
+                "test_pattern": false, "rainbow_slot": 6, "rainbow_backlight": false, "health_check": false, "exclusive_check": false,
             }),
         ),
         (
@@ -204,7 +243,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             56_000,
             json!({
                 "capture_ms": 0, "query": true, "read_keymap": false,
-                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": true, "health_check": false,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": true, "health_check": false, "exclusive_check": false,
             }),
         ),
         (
@@ -222,7 +261,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             20_000,
             json!({
                 "capture_ms": 0, "query": false, "read_keymap": false,
-                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false, "exclusive_check": false,
             }),
         ),
         (
@@ -240,7 +279,16 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             3_000,
             json!({
                 "capture_ms": 30000, "query": false, "read_keymap": false,
-                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": true,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": true, "exclusive_check": false,
+            }),
+        ),
+        (
+            true,
+            vec!["--exclusive-check", "--capture-ms", "0"],
+            5_000,
+            json!({
+                "capture_ms": 0, "query": false, "read_keymap": false,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false, "exclusive_check": true,
             }),
         ),
         (
@@ -594,6 +642,14 @@ fn malformed_or_forged_worker_results_fail_closed_without_echoing_payload() {
         let mut unknown = valid.clone();
         unknown["private"] = json!(true);
         cases.push(unknown);
+        if is_micro {
+            let mut invalid = valid.clone();
+            invalid["exclusive_open"] = json!({
+                "requested": true, "acquired": true, "released": true,
+                "open_code": 0, "close_code": 0,
+            });
+            cases.push(invalid);
+        }
         let mut unknown = valid;
         unknown["report"]["private"] = json!(true);
         cases.push(unknown);
@@ -633,6 +689,79 @@ fn malformed_or_forged_worker_results_fail_closed_without_echoing_payload() {
         let mut forged = health.health_outcome().payload().unwrap();
         forged["report"]["opened"] = json!(true);
         assert!(execute_with(health, |_, _| Ok(worker_result(forged))).is_err());
+    }
+}
+
+#[test]
+fn exclusive_worker_results_require_consistent_metadata_and_success_contracts() {
+    let options = parse(&args(&["--exclusive-check", "--capture-ms", "0"]), true).unwrap();
+    let valid = success(&options).payload().unwrap();
+    execute_with(options.clone(), |_, _| Ok(worker_result(valid.clone()))).unwrap();
+
+    let mut cases = Vec::new();
+    let mut missing = valid.clone();
+    missing["exclusive_open"] = Value::Null;
+    cases.push(missing);
+
+    let mut wrong_phase = valid.clone();
+    wrong_phase["report"]["phase"] = json!("complete");
+    cases.push(wrong_phase);
+
+    let mut wrong_requested = valid.clone();
+    wrong_requested["exclusive_open"]["requested"] = json!(false);
+    cases.push(wrong_requested);
+
+    let mut wrong_close = valid.clone();
+    wrong_close["exclusive_open"]["close_code"] = json!(-536870160);
+    cases.push(wrong_close);
+
+    let mut wrong_candidate = valid.clone();
+    wrong_candidate["report"]["candidate"]["interface_number"] = json!(0);
+    cases.push(wrong_candidate);
+
+    let mut no_descriptor = valid.clone();
+    no_descriptor["report"]["descriptor_verified"] = json!(false);
+    cases.push(no_descriptor);
+
+    let mut fake_success = valid.clone();
+    fake_success["probe_succeeded"] = json!(true);
+    fake_success["error"] = json!("forced");
+    cases.push(fake_success);
+
+    let mut io_counted = valid.clone();
+    io_counted["report"]["output_attempts"] = json!(1);
+    cases.push(io_counted);
+
+    for payload in cases {
+        let error = execute_with(options.clone(), |_, _| Ok(worker_result(payload)))
+            .err()
+            .unwrap();
+        let error: Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["status"], "worker_error");
+        assert_eq!(error["error"]["kind"], "protocol");
+    }
+}
+
+#[test]
+fn exclusive_failures_keep_native_errors_not_protocol_wrapping() {
+    let options = parse(&args(&["--exclusive-check", "--capture-ms", "0"]), true).unwrap();
+    let baseline = success(&options).payload().unwrap();
+    for error in [
+        "Os { op: Enumerate, code: 5 }",
+        "Micro requires exactly one candidate; found 0",
+        "Micro requires exactly one candidate; found 2",
+    ] {
+        let mut payload = baseline.clone();
+        payload["probe_succeeded"] = json!(false);
+        payload["error"] = json!(error);
+        payload["report"]["phase"] = json!("exclusive_open_check");
+        payload["report"]["opened"] = json!(false);
+        payload["report"]["descriptor_verified"] = json!(false);
+        payload["report"]["candidate"] = Value::Null;
+        payload["exclusive_open"] = Value::Null;
+        let result = execute_with(options.clone(), |_, _| Ok(worker_result(payload.clone())));
+        let surfaced: Value = serde_json::from_str(&result.err().unwrap()).unwrap();
+        assert_eq!(surfaced, payload);
     }
 }
 

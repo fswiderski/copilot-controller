@@ -9,6 +9,9 @@ use super::*;
 pub struct FakeState {
     pub enumerate_calls: usize,
     pub open_calls: usize,
+    pub descriptor_calls: usize,
+    pub exclusive_open_calls: usize,
+    pub exclusive_open_options: Vec<u32>,
     pub written: Vec<Vec<u8>>,
     pub inputs: VecDeque<Vec<u8>>,
     /// Count reported back from `write`, overriding the true length.
@@ -17,6 +20,7 @@ pub struct FakeState {
     pub read_count: Option<usize>,
     pub writes_unsupported: bool,
     pub report_descriptor: Option<Vec<u8>>,
+    pub exclusive_open_result: Option<ExclusiveOpenProbe>,
 }
 
 pub struct FakeBackend {
@@ -52,6 +56,32 @@ impl HidBackend for FakeBackend {
             return Err(HidError::NotFound);
         }
         Ok(Box::new(FakeTransport(self.state.clone())))
+    }
+
+    fn original_report_descriptor(&self, d: &HidDescriptor) -> Result<Vec<u8>, HidError> {
+        let mut state = self.state.borrow_mut();
+        state.descriptor_calls += 1;
+        if !self.devices.contains(d) {
+            return Err(HidError::NotFound);
+        }
+        state
+            .report_descriptor
+            .clone()
+            .ok_or(HidError::EvidenceUnavailable(
+                EvidenceKind::RawReportDescriptor,
+            ))
+    }
+
+    fn open_exclusive_probe(&self, d: &HidDescriptor) -> Result<ExclusiveOpenProbe, HidError> {
+        let mut state = self.state.borrow_mut();
+        state.exclusive_open_calls += 1;
+        state.exclusive_open_options.push(1);
+        if !self.devices.contains(d) {
+            return Err(HidError::NotFound);
+        }
+        state.exclusive_open_result.ok_or(HidError::Unavailable(
+            UnavailableReason::UnsupportedPlatform,
+        ))
     }
 }
 

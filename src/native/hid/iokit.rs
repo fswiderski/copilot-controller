@@ -13,6 +13,10 @@ use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::devices::micro::{
+    enumeration::{APPLICATION_PID, APPLICATION_VID, REPORT_SIZE, USAGE, USAGE_PAGE},
+    probe::verify_micro_descriptor,
+};
 
 type CFTypeRef = *const c_void;
 type CFIndex = isize;
@@ -23,6 +27,7 @@ const SINT32: CFIndex = 3;
 const MAX_QUEUED: usize = 64;
 const MAX_SCAN: CFIndex = 4096;
 const MAX_INTERFACE_ANCESTRY_NODES: usize = 16;
+const K_IO_HID_OPTIONS_TYPE_SEIZE_DEVICE: u32 = 0x1;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -457,6 +462,41 @@ impl HidBackend for IoKitHid {
     ) -> Result<Box<dyn HidTransport>, HidError> {
         self.open_with_policy(d, true)
     }
+
+    fn original_report_descriptor(&self, d: &HidDescriptor) -> Result<Vec<u8>, HidError> {
+        self.authorize()?;
+        let matched = Matched::new(d.identity)?;
+        let dev = self.find_device(&matched, d, false)?;
+        original_report_descriptor(dev).ok_or(HidError::EvidenceUnavailable(
+            EvidenceKind::RawReportDescriptor,
+        ))
+    }
+
+    fn open_exclusive_probe(&self, d: &HidDescriptor) -> Result<ExclusiveOpenProbe, HidError> {
+        self.authorize()?;
+        if !micro_exclusive_candidate(d) {
+            return Err(HidError::Protocol("unqualified Micro transport/interface"));
+        }
+        let report_descriptor = self.original_report_descriptor(d)?;
+        verify_micro_descriptor(d, &report_descriptor)?;
+        let matched = Matched::new(d.identity)?;
+        let dev = self.find_device(&matched, d, false)?;
+        // SAFETY: `dev` is a live element of the matched set; retained for close.
+        let dev = Cf(unsafe { CFRetain(dev) });
+        exclusive_open_probe_sequence(
+            dev.0,
+            d,
+            |device, options| {
+                // SAFETY: valid device; options are caller-selected constants.
+                unsafe { IOHIDDeviceOpen(device, options) }
+            },
+            |device, options| {
+                // SAFETY: valid opened device; close has no seize option.
+                unsafe { IOHIDDeviceClose(device, options) }
+            },
+            |device| describe(device, d.identity),
+        )
+    }
 }
 
 impl IoKitHid {
@@ -481,14 +521,7 @@ impl IoKitHid {
     ) -> Result<Box<dyn HidTransport>, HidError> {
         self.authorize()?;
         let matched = Matched::new(d.identity)?;
-        let dev = matched
-            .devices()?
-            .into_iter()
-            .find(|&x| {
-                describe(x, d.identity)
-                    .is_some_and(|c| same_open_identity(&c, d, allow_usage_change))
-            })
-            .ok_or(HidError::NotFound)?;
+        let dev = self.find_device(&matched, d, allow_usage_change)?;
         // SAFETY: `dev` is a live element of the matched set; retained for our lifetime.
         let dev = unsafe { CFRetain(dev) };
         let dev = Cf(dev);
@@ -533,6 +566,75 @@ impl IoKitHid {
             capability: self.capability.clone(),
         }))
     }
+
+    fn find_device(
+        &self,
+        matched: &Matched,
+        descriptor: &HidDescriptor,
+        allow_usage_change: bool,
+    ) -> Result<CFTypeRef, HidError> {
+        matched
+            .devices()?
+            .into_iter()
+            .find(|&device| {
+                describe(device, descriptor.identity).is_some_and(|candidate| {
+                    same_open_identity(&candidate, descriptor, allow_usage_change)
+                })
+            })
+            .ok_or(HidError::NotFound)
+    }
+}
+
+fn micro_exclusive_candidate(descriptor: &HidDescriptor) -> bool {
+    descriptor.identity
+        == HidIdentity {
+            vendor_id: APPLICATION_VID,
+            product_id: APPLICATION_PID,
+        }
+        && descriptor.usage_page == USAGE_PAGE
+        && descriptor.usage == USAGE
+        && descriptor.interface_number == Some(2)
+        && descriptor.bus == Some(HidBus::Usb)
+        && descriptor.max_input_report_len == REPORT_SIZE
+        && descriptor.max_output_report_len == REPORT_SIZE
+}
+
+fn exclusive_open_probe_sequence(
+    device: CFTypeRef,
+    selected: &HidDescriptor,
+    open: impl FnOnce(CFTypeRef, u32) -> IOReturn,
+    close: impl FnOnce(CFTypeRef, u32) -> IOReturn,
+    describe_opened: impl FnOnce(CFTypeRef) -> Option<HidDescriptor>,
+) -> Result<ExclusiveOpenProbe, HidError> {
+    let open_code = open(device, K_IO_HID_OPTIONS_TYPE_SEIZE_DEVICE);
+    if open_code != 0 {
+        return Ok(ExclusiveOpenProbe {
+            requested: true,
+            acquired: false,
+            released: false,
+            open_code: i64::from(open_code),
+            close_code: None,
+        });
+    }
+    let reopened_ok = describe_opened(device)
+        .is_some_and(|reopened| same_open_identity(&reopened, selected, false));
+    let close_code = close(device, 0);
+    if close_code != 0 {
+        return Err(HidError::Os {
+            op: HidOp::Close,
+            code: i64::from(close_code),
+        });
+    }
+    if !reopened_ok {
+        return Err(HidError::NotFound);
+    }
+    Ok(ExclusiveOpenProbe {
+        requested: true,
+        acquired: true,
+        released: true,
+        open_code: 0,
+        close_code: Some(0),
+    })
 }
 
 struct InputState {
@@ -1095,5 +1197,124 @@ mod tests {
         });
         assert_eq!(direct, Some(-1));
         assert!(!called);
+    }
+
+    fn micro_descriptor() -> HidDescriptor {
+        HidDescriptor {
+            identity: HidIdentity {
+                vendor_id: APPLICATION_VID,
+                product_id: APPLICATION_PID,
+            },
+            usage_page: USAGE_PAGE,
+            usage: USAGE,
+            product: None,
+            serial: None,
+            max_input_report_len: REPORT_SIZE,
+            max_output_report_len: REPORT_SIZE,
+            interface_number: Some(2),
+            bus: Some(HidBus::Usb),
+            path: HidPath::new("iokit-test").unwrap(),
+        }
+    }
+
+    #[test]
+    fn exclusive_entry_gate_rejects_non_micro_targets() {
+        let descriptor = micro_descriptor();
+        assert!(micro_exclusive_candidate(&descriptor));
+
+        let mut wrong_interface = descriptor.clone();
+        wrong_interface.interface_number = Some(0);
+        assert!(!micro_exclusive_candidate(&wrong_interface));
+
+        let mut wrong_bus = descriptor.clone();
+        wrong_bus.bus = Some(HidBus::Bluetooth);
+        assert!(!micro_exclusive_candidate(&wrong_bus));
+
+        let mut wrong_usage = descriptor.clone();
+        wrong_usage.usage_page = 0x01;
+        assert!(!micro_exclusive_candidate(&wrong_usage));
+    }
+
+    #[test]
+    fn exclusive_sequence_uses_seize_option_without_fallback_and_checks_close() {
+        let descriptor = micro_descriptor();
+        let mut open_calls = Vec::new();
+        let mut close_calls = Vec::new();
+        let denied = exclusive_open_probe_sequence(
+            null(),
+            &descriptor,
+            |_device, options| {
+                open_calls.push(options);
+                -536_870_174
+            },
+            |_device, options| {
+                close_calls.push(options);
+                0
+            },
+            |_device| Some(descriptor.clone()),
+        )
+        .unwrap();
+        assert_eq!(open_calls, vec![K_IO_HID_OPTIONS_TYPE_SEIZE_DEVICE]);
+        assert!(close_calls.is_empty());
+        assert_eq!(
+            denied,
+            ExclusiveOpenProbe {
+                requested: true,
+                acquired: false,
+                released: false,
+                open_code: -536_870_174,
+                close_code: None,
+            }
+        );
+
+        open_calls.clear();
+        close_calls.clear();
+        let close_error = exclusive_open_probe_sequence(
+            null(),
+            &descriptor,
+            |_device, options| {
+                open_calls.push(options);
+                0
+            },
+            |_device, options| {
+                close_calls.push(options);
+                -536_870_160
+            },
+            |_device| Some(descriptor.clone()),
+        )
+        .unwrap_err();
+        assert_eq!(open_calls, vec![K_IO_HID_OPTIONS_TYPE_SEIZE_DEVICE]);
+        assert_eq!(close_calls, vec![0]);
+        assert_eq!(
+            close_error,
+            HidError::Os {
+                op: HidOp::Close,
+                code: -536_870_160,
+            }
+        );
+    }
+
+    #[test]
+    fn exclusive_sequence_revalidates_identity_before_reporting_success() {
+        let descriptor = micro_descriptor();
+        let mismatch = HidDescriptor {
+            usage: USAGE + 1,
+            ..descriptor.clone()
+        };
+        let error = exclusive_open_probe_sequence(
+            null(),
+            &descriptor,
+            |_device, options| {
+                assert_eq!(options, K_IO_HID_OPTIONS_TYPE_SEIZE_DEVICE);
+                0
+            },
+            |_device, options| {
+                assert_eq!(options, 0);
+                0
+            },
+            |_device| Some(mismatch),
+        )
+        .unwrap_err();
+        assert_eq!(error, HidError::NotFound);
     }
 }

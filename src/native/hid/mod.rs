@@ -190,6 +190,7 @@ pub enum ArgumentError {
 pub enum HidOp {
     Enumerate,
     Open,
+    Close,
     Write,
     Read,
 }
@@ -238,6 +239,32 @@ pub trait HidBackend {
     ) -> Result<Box<dyn HidTransport>, HidError> {
         self.open(descriptor)
     }
+
+    /// Reads original HID report-descriptor bytes without opening transport when supported.
+    fn original_report_descriptor(&self, _descriptor: &HidDescriptor) -> Result<Vec<u8>, HidError> {
+        Err(HidError::EvidenceUnavailable(
+            EvidenceKind::RawReportDescriptor,
+        ))
+    }
+
+    /// Attempts a single exclusive open/close sequence for diagnostics.
+    fn open_exclusive_probe(
+        &self,
+        _descriptor: &HidDescriptor,
+    ) -> Result<ExclusiveOpenProbe, HidError> {
+        Err(HidError::Unavailable(
+            UnavailableReason::UnsupportedPlatform,
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExclusiveOpenProbe {
+    pub requested: bool,
+    pub acquired: bool,
+    pub released: bool,
+    pub open_code: i64,
+    pub close_code: Option<i64>,
 }
 
 /// Raw report I/O. Implementations may assume arguments were bounds-checked by

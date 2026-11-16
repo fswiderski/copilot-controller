@@ -5,8 +5,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::native::hid::{
-    EvidenceKind, HidBackend, HidBus, HidDescriptor, HidDevice, HidError, HidIdentity, HidMatcher,
-    enumerate,
+    EvidenceKind, ExclusiveOpenProbe, HidBackend, HidBus, HidDescriptor, HidDevice, HidError,
+    HidIdentity, HidMatcher, enumerate,
 };
 
 use super::{
@@ -59,6 +59,8 @@ pub struct MicroProbeOptions {
     pub rainbow_backlight: bool,
     #[serde(default)]
     pub health_check: bool,
+    #[serde(default)]
+    pub exclusive_check: bool,
 }
 
 impl MicroProbeOptions {
@@ -97,14 +99,39 @@ impl MicroProbeOptions {
                 || self.read_keymap
                 || self.test_pattern
                 || self.rainbow_slot.is_some()
-                || self.rainbow_backlight)
+                || self.rainbow_backlight
+                || self.exclusive_check)
         {
             return Err(
-                "health_check conflicts with query, read_keymap, test_pattern, rainbow_slot, and rainbow_backlight",
+                "health_check conflicts with query, read_keymap, test_pattern, rainbow_slot, rainbow_backlight, and exclusive_check",
+            );
+        }
+        if self.exclusive_check
+            && (self.capture_ms != 0
+                || self.query
+                || self.read_keymap
+                || self.test_pattern
+                || self.rainbow_slot.is_some()
+                || self.rainbow_backlight
+                || self.health_check)
+        {
+            return Err(
+                "exclusive_check requires capture_ms=0 and conflicts with query, read_keymap, test_pattern, rainbow_slot, rainbow_backlight, and health_check",
             );
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExclusiveOpenCheck {
+    pub requested: bool,
+    pub acquired: bool,
+    pub released: bool,
+    pub open_code: i64,
+    #[serde(deserialize_with = "required_nullable")]
+    pub close_code: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +214,8 @@ pub struct MicroProbeResult {
     pub hardware_qualified: bool,
     pub read_only: bool,
     pub report: Progress,
+    #[serde(deserialize_with = "required_nullable")]
+    pub exclusive_open: Option<ExclusiveOpenCheck>,
     #[serde(deserialize_with = "required_nullable")]
     pub error: Option<String>,
     #[serde(deserialize_with = "required_nullable")]
@@ -603,6 +632,9 @@ pub fn run_micro_probe_with_backend(
     if options.health_check {
         return invalid_result("health_check must use micro_health_check without a backend");
     }
+    if options.exclusive_check {
+        return run_micro_exclusive_open_check_with_backend(backend);
+    }
     let matcher = HidMatcher {
         identity: HidIdentity {
             vendor_id: APPLICATION_VID,
@@ -626,28 +658,14 @@ pub fn run_micro_probe_with_backend(
         let mut result = invalid_result(
             &HidError::EvidenceUnavailable(EvidenceKind::InterfaceNumber).to_string(),
         );
-        result.report.candidate = Some(Candidate {
-            vendor_id: descriptor.identity.vendor_id,
-            product_id: descriptor.identity.product_id,
-            usage_page: descriptor.usage_page,
-            usage: descriptor.usage,
-            interface_number: descriptor.interface_number,
-            transport: bus_name(descriptor.bus).to_owned(),
-        });
+        result.report.candidate = Some(candidate_from_descriptor(descriptor));
         return result;
     }
     if descriptor.bus.is_none() || descriptor.bus == Some(HidBus::Unknown) {
         let mut result = invalid_result(
             &HidError::EvidenceUnavailable(EvidenceKind::BusClassification).to_string(),
         );
-        result.report.candidate = Some(Candidate {
-            vendor_id: descriptor.identity.vendor_id,
-            product_id: descriptor.identity.product_id,
-            usage_page: descriptor.usage_page,
-            usage: descriptor.usage,
-            interface_number: descriptor.interface_number,
-            transport: bus_name(descriptor.bus).to_owned(),
-        });
+        result.report.candidate = Some(candidate_from_descriptor(descriptor));
         return result;
     }
     if descriptor.max_input_report_len != REPORT_SIZE
@@ -663,20 +681,110 @@ pub fn run_micro_probe_with_backend(
         Ok(bytes) => bytes,
         Err(error) => {
             let mut result = invalid_result(&error.to_string());
-            result.report.candidate = Some(Candidate {
-                vendor_id: descriptor.identity.vendor_id,
-                product_id: descriptor.identity.product_id,
-                usage_page: descriptor.usage_page,
-                usage: descriptor.usage,
-                interface_number: descriptor.interface_number,
-                transport: bus_name(descriptor.bus).to_owned(),
-            });
+            result.report.candidate = Some(candidate_from_descriptor(descriptor));
             result.report.opened = true;
             return result;
         }
     };
     let mut io = ClockedHid::new(&mut device);
     run_micro_probe(&mut io, descriptor, &report_descriptor, options)
+}
+
+fn run_micro_exclusive_open_check_with_backend(backend: &dyn HidBackend) -> MicroProbeResult {
+    run_micro_exclusive_open_check_with_verifier(backend, verify_micro_descriptor)
+}
+
+fn run_micro_exclusive_open_check_with_verifier(
+    backend: &dyn HidBackend,
+    verify: impl FnOnce(&HidDescriptor, &[u8]) -> Result<(), HidError>,
+) -> MicroProbeResult {
+    let invalid = |error: String| {
+        let mut result = invalid_result(&error);
+        result.report.phase = "exclusive_open_check".to_owned();
+        result
+    };
+    let matcher = HidMatcher {
+        identity: HidIdentity {
+            vendor_id: APPLICATION_VID,
+            product_id: APPLICATION_PID,
+        },
+        usage_page: Some(USAGE_PAGE),
+        usage: Some(USAGE),
+    };
+    let candidates = match enumerate(backend, &matcher, 64) {
+        Ok(candidates) => candidates,
+        Err(error) => return invalid(error.to_string()),
+    };
+    if candidates.len() != 1 {
+        return invalid(format!(
+            "Micro requires exactly one candidate; found {}",
+            candidates.len()
+        ));
+    }
+    let descriptor = &candidates[0];
+    let mut result = MicroProbeResult {
+        read_only: true,
+        ..MicroProbeResult::default()
+    };
+    result.report.candidate = Some(candidate_from_descriptor(descriptor));
+    result.report.phase = "exclusive_open_check".to_owned();
+    if descriptor.interface_number != Some(2)
+        || descriptor.bus != Some(HidBus::Usb)
+        || descriptor.max_input_report_len != REPORT_SIZE
+        || descriptor.max_output_report_len != REPORT_SIZE
+    {
+        result.error = Some("unqualified Micro transport/interface".to_owned());
+        return result;
+    }
+    let report_descriptor = match backend.original_report_descriptor(descriptor) {
+        Ok(report_descriptor) => report_descriptor,
+        Err(error) => {
+            result.error = Some(error.to_string());
+            return result;
+        }
+    };
+    if let Err(error) = verify(descriptor, &report_descriptor) {
+        result.error = Some(error.to_string());
+        return result;
+    }
+    result.report.descriptor_verified = true;
+    let probe = match backend.open_exclusive_probe(descriptor) {
+        Ok(probe) => probe,
+        Err(error) => {
+            result.error = Some(error.to_string());
+            return result;
+        }
+    };
+    result.exclusive_open = Some(ExclusiveOpenCheck::from(probe));
+    result.report.opened = probe.acquired;
+    if probe.open_code != 0 {
+        result.error = Some(format!(
+            "exclusive open failed with native code {}",
+            probe.open_code
+        ));
+        return result;
+    }
+    if probe.close_code != Some(0) {
+        result.error = Some(format!(
+            "exclusive close failed with native code {}",
+            probe.close_code.unwrap_or(-1)
+        ));
+        return result;
+    }
+    result.probe_succeeded = true;
+    result
+}
+
+impl From<ExclusiveOpenProbe> for ExclusiveOpenCheck {
+    fn from(value: ExclusiveOpenProbe) -> Self {
+        Self {
+            requested: value.requested,
+            acquired: value.acquired,
+            released: value.released,
+            open_code: value.open_code,
+            close_code: value.close_code,
+        }
+    }
 }
 
 pub fn verify_micro_descriptor(
@@ -729,6 +837,17 @@ fn invalid_result(error: &str) -> MicroProbeResult {
         read_only: true,
         error: Some(error.to_owned()),
         ..MicroProbeResult::default()
+    }
+}
+
+fn candidate_from_descriptor(descriptor: &HidDescriptor) -> Candidate {
+    Candidate {
+        vendor_id: descriptor.identity.vendor_id,
+        product_id: descriptor.identity.product_id,
+        usage_page: descriptor.usage_page,
+        usage: descriptor.usage,
+        interface_number: descriptor.interface_number,
+        transport: bus_name(descriptor.bus).to_owned(),
     }
 }
 
@@ -1626,6 +1745,115 @@ mod tests {
         assert!(!result.probe_succeeded);
         assert_eq!(backend.state.borrow().enumerate_calls, 0);
         assert_eq!(backend.state.borrow().open_calls, 0);
+    }
+
+    #[test]
+    fn exclusive_check_requires_zero_capture_and_no_other_opt_ins() {
+        assert!(
+            MicroProbeOptions {
+                exclusive_check: true,
+                ..MicroProbeOptions::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        for options in [
+            MicroProbeOptions {
+                exclusive_check: true,
+                capture_ms: 1,
+                ..MicroProbeOptions::default()
+            },
+            MicroProbeOptions {
+                exclusive_check: true,
+                query: true,
+                ..MicroProbeOptions::default()
+            },
+            MicroProbeOptions {
+                exclusive_check: true,
+                health_check: true,
+                ..MicroProbeOptions::default()
+            },
+        ] {
+            assert!(options.validate().is_err(), "{options:?}");
+        }
+    }
+
+    #[test]
+    fn exclusive_check_never_falls_back_to_nonexclusive_open_and_keeps_io_counters_zero() {
+        let backend = FakeBackend::new(vec![descriptor()]);
+        backend.state.borrow_mut().report_descriptor = Some(vec![0; 36]);
+        backend.state.borrow_mut().exclusive_open_result = Some(ExclusiveOpenProbe {
+            requested: true,
+            acquired: true,
+            released: true,
+            open_code: 0,
+            close_code: Some(0),
+        });
+        let result = run_micro_probe_with_backend(
+            &backend,
+            MicroProbeOptions {
+                capture_ms: 0,
+                exclusive_check: true,
+                ..MicroProbeOptions::default()
+            },
+        );
+        assert!(!result.probe_succeeded);
+        assert_eq!(backend.state.borrow().open_calls, 0);
+        assert_eq!(backend.state.borrow().descriptor_calls, 1);
+        assert_eq!(backend.state.borrow().exclusive_open_calls, 0);
+        assert_eq!(result.report.read_reports, 0);
+        assert_eq!(result.report.output_reports, 0);
+        assert_eq!(result.report.output_attempts, 0);
+        assert!(result.read_only);
+    }
+
+    #[test]
+    fn exclusive_check_reports_open_denial_and_close_failure_without_retry() {
+        let backend = FakeBackend::new(vec![descriptor()]);
+        backend.state.borrow_mut().report_descriptor = Some(vec![1; 36]);
+        backend.state.borrow_mut().exclusive_open_result = Some(ExclusiveOpenProbe {
+            requested: true,
+            acquired: false,
+            released: false,
+            open_code: -536_870_174,
+            close_code: None,
+        });
+        let denied = run_micro_exclusive_open_check_with_verifier(&backend, |_, _| Ok(()));
+        assert!(!denied.probe_succeeded);
+        assert_eq!(
+            denied.error.as_deref(),
+            Some("exclusive open failed with native code -536870174")
+        );
+        assert_eq!(
+            denied.exclusive_open,
+            Some(ExclusiveOpenCheck {
+                requested: true,
+                acquired: false,
+                released: false,
+                open_code: -536_870_174,
+                close_code: None,
+            })
+        );
+        assert_eq!(backend.state.borrow().open_calls, 0);
+        assert_eq!(backend.state.borrow().exclusive_open_calls, 1);
+        assert_eq!(backend.state.borrow().exclusive_open_options, vec![1]);
+
+        backend.state.borrow_mut().exclusive_open_result = Some(ExclusiveOpenProbe {
+            requested: true,
+            acquired: true,
+            released: false,
+            open_code: 0,
+            close_code: Some(-536_870_160),
+        });
+        let close_error = run_micro_exclusive_open_check_with_verifier(&backend, |_, _| Ok(()));
+        assert!(!close_error.probe_succeeded);
+        assert_eq!(
+            close_error.error.as_deref(),
+            Some("exclusive close failed with native code -536870160")
+        );
+        assert_eq!(backend.state.borrow().open_calls, 0);
+        assert_eq!(backend.state.borrow().exclusive_open_calls, 2);
+        assert_eq!(backend.state.borrow().exclusive_open_options, vec![1, 1]);
     }
 
     #[test]

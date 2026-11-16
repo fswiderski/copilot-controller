@@ -271,3 +271,19 @@ fn unsupervised_write_fails_closed_before_any_io() {
         vec![1]
     );
 }
+
+#[test]
+fn exclusive_probe_defaults_unsupported_and_does_not_change_normal_open() {
+    let descriptor = desc(ID, 1, "exclusive");
+    let backend = FakeBackend::new(vec![descriptor.clone()]);
+    assert_eq!(
+        backend.open_exclusive_probe(&descriptor),
+        Err(HidError::Unavailable(
+            UnavailableReason::UnsupportedPlatform
+        ))
+    );
+    assert_eq!(backend.state.borrow().exclusive_open_calls, 1);
+    assert_eq!(backend.state.borrow().exclusive_open_options, vec![1]);
+    let _device = HidDevice::open(&backend, &descriptor).unwrap();
+    assert_eq!(backend.state.borrow().open_calls, 1);
+}
