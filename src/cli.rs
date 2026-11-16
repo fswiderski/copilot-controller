@@ -44,7 +44,8 @@ Usage: copilot-controller <command>
   micro-decode <hex-report>... (1..128 exact 64-byte reports)
   micro-preview
   micro-probe [--capture-ms <0..30000>] [--query] [--read-keymap]
-              [--test-pattern] [--health-check]
+              [--test-pattern] [--rainbow-slot <1..6>]
+              [--rainbow-backlight] [--health-check]
   akp03-doctor [--discover (unavailable)]
   akp03-decode <hex> [--rev2]
   akp03-preview
@@ -61,8 +62,11 @@ Usage: copilot-controller <command>
 All previews and probes are not ready or hardware-qualified. Native probes use
 contained Windows workers or macOS ARM64 workers.
 HID capture defaults to 2000 ms. Micro keymap
-and LED test require --query; AKP03 display test requires --initialize.
---health-check conflicts with these opt-ins and performs no device access.
+and LED tests require --query. --rainbow-slot targets one of six protocol slot
+LEDs (v.oai.thstatus ids 0..5), not all physical buttons. --rainbow-backlight
+is a temporary whole-keypad preview (lights.preview) with underglow forced off.
+AKP03 display test requires --initialize. --health-check conflicts with these
+opt-ins and performs no device access.
 Windows HID descriptor evidence is unavailable, so HID live probes fail closed;
 macOS HID requires its device feature and exact native descriptor evidence;
 IOKit access/writes require the private supervised-child capability. Linux live

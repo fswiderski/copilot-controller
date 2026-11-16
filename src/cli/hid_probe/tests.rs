@@ -4,6 +4,10 @@ fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).into()).collect()
 }
 
+fn options_payload(micro: bool) -> Value {
+    parse(&[], micro).unwrap().payload().unwrap()
+}
+
 fn worker_result(payload: Value) -> worker::DiagnosticResult {
     worker::DiagnosticResult {
         worker: worker::WorkerIdentity {
@@ -70,6 +74,19 @@ fn invalid_public_and_programmatic_options_never_launch_workers() {
     ];
     let micro_only: &[&[&str]] = &[
         &["--read-keymap"],
+        &["--rainbow-slot"],
+        &["--rainbow-slot", "0"],
+        &["--rainbow-slot", "7"],
+        &["--rainbow-slot", "1.0"],
+        &["--rainbow-slot", "--query"],
+        &["--rainbow-slot", "1", "--rainbow-slot", "2"],
+        &["--rainbow-slot", "1", "--health-check"],
+        &["--query", "--rainbow-slot", "1", "--test-pattern"],
+        &["--rainbow-backlight"],
+        &["--rainbow-backlight", "--rainbow-backlight"],
+        &["--query", "--rainbow-backlight", "--test-pattern"],
+        &["--query", "--rainbow-backlight", "--rainbow-slot", "1"],
+        &["--query", "--rainbow-backlight", "--health-check"],
         &["--query", "--query"],
         &["--query", "--health-check"],
         &["--query", "--read-keymap", "--health-check"],
@@ -95,6 +112,26 @@ fn invalid_public_and_programmatic_options_never_launch_workers() {
     for options in [
         Options::Micro(micro::MicroProbeOptions {
             read_keymap: true,
+            ..Default::default()
+        }),
+        Options::Micro(micro::MicroProbeOptions {
+            rainbow_slot: Some(1),
+            ..Default::default()
+        }),
+        Options::Micro(micro::MicroProbeOptions {
+            rainbow_backlight: true,
+            ..Default::default()
+        }),
+        Options::Micro(micro::MicroProbeOptions {
+            query: true,
+            test_pattern: true,
+            rainbow_slot: Some(1),
+            ..Default::default()
+        }),
+        Options::Micro(micro::MicroProbeOptions {
+            query: true,
+            test_pattern: true,
+            rainbow_backlight: true,
             ..Default::default()
         }),
         Options::Micro(micro::MicroProbeOptions {
@@ -125,7 +162,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             22_000,
             json!({
                 "capture_ms": 2000, "query": false, "read_keymap": false,
-                "test_pattern": false, "health_check": false,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false,
             }),
         ),
         (
@@ -149,7 +186,25 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             55_000,
             json!({
                 "capture_ms": 30000, "query": true, "read_keymap": true,
-                "test_pattern": true, "health_check": false,
+                "test_pattern": true, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false,
+            }),
+        ),
+        (
+            true,
+            vec!["--query", "--rainbow-slot", "6", "--capture-ms", "0"],
+            56_000,
+            json!({
+                "capture_ms": 0, "query": true, "read_keymap": false,
+                "test_pattern": false, "rainbow_slot": 6, "rainbow_backlight": false, "health_check": false,
+            }),
+        ),
+        (
+            true,
+            vec!["--query", "--rainbow-backlight", "--capture-ms", "0"],
+            56_000,
+            json!({
+                "capture_ms": 0, "query": true, "read_keymap": false,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": true, "health_check": false,
             }),
         ),
         (
@@ -167,7 +222,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             20_000,
             json!({
                 "capture_ms": 0, "query": false, "read_keymap": false,
-                "test_pattern": false, "health_check": false,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false,
             }),
         ),
         (
@@ -185,7 +240,7 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             3_000,
             json!({
                 "capture_ms": 30000, "query": false, "read_keymap": false,
-                "test_pattern": false, "health_check": true,
+                "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": true,
             }),
         ),
         (
@@ -212,6 +267,32 @@ fn public_defaults_opt_ins_and_supervision_match_device_contracts() {
             Ok(worker_result(payload))
         })
         .unwrap();
+    }
+}
+
+#[test]
+fn rainbow_slot_parser_requires_query_and_rejects_bounds_or_conflicts() {
+    let options = parse(&args(&["--query", "--rainbow-slot", "1"]), true).unwrap();
+    assert_eq!(
+        options.payload().unwrap()["rainbow_slot"],
+        json!(1),
+        "slot 1 should parse"
+    );
+    let options = parse(&args(&["--query", "--rainbow-slot", "6"]), true).unwrap();
+    assert_eq!(options.payload().unwrap()["rainbow_slot"], json!(6));
+    for invalid in [
+        args(&["--rainbow-slot", "1"]),
+        args(&["--query", "--rainbow-slot", "0"]),
+        args(&["--query", "--rainbow-slot", "7"]),
+        args(&["--query", "--rainbow-slot", "x"]),
+        args(&["--query", "--rainbow-slot", "1", "--test-pattern"]),
+        args(&["--query", "--rainbow-slot", "1", "--health-check"]),
+        args(&["--rainbow-backlight"]),
+        args(&["--query", "--rainbow-backlight", "--test-pattern"]),
+        args(&["--query", "--rainbow-backlight", "--health-check"]),
+        args(&["--query", "--rainbow-backlight", "--rainbow-slot", "2"]),
+    ] {
+        assert!(parse(&invalid, true).is_err(), "{invalid:?}");
     }
 }
 
@@ -252,6 +333,24 @@ fn callback_requires_complete_strict_options_before_containment_or_native_access
         let mut dependent = valid;
         dependent["test_pattern"] = json!(true);
         cases.push(dependent);
+        if is_micro {
+            let mut dependent = options_payload(true);
+            dependent["rainbow_slot"] = json!(1);
+            cases.push(dependent);
+            let mut dependent = options_payload(true);
+            dependent["rainbow_backlight"] = json!(true);
+            cases.push(dependent);
+            let mut conflict = options_payload(true);
+            conflict["query"] = json!(true);
+            conflict["rainbow_slot"] = json!(1);
+            conflict["test_pattern"] = json!(true);
+            cases.push(conflict);
+            let mut conflict = options_payload(true);
+            conflict["query"] = json!(true);
+            conflict["rainbow_backlight"] = json!(true);
+            conflict["test_pattern"] = json!(true);
+            cases.push(conflict);
+        }
         for payload in cases {
             assert!(
                 callback_with(

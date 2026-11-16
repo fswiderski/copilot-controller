@@ -97,6 +97,16 @@ pub fn diagnostic_frame() -> [LedEntry; 6] {
     )
 }
 
+pub fn rainbow_slot_frame(slot: u8, color: u32) -> [LedEntry; 6] {
+    std::array::from_fn(|index| LedEntry {
+        id: index as u8,
+        c: if index as u8 == slot { color } else { 0x000000 },
+        b: DEFAULT_BRIGHTNESS,
+        e: LEGACY_EFFECT,
+        s: LEGACY_SPEED,
+    })
+}
+
 pub fn active_slots(statuses: &[LedStatus; 6]) -> Vec<Slot> {
     statuses
         .iter()

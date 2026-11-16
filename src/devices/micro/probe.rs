@@ -14,8 +14,8 @@ use super::{
     enumeration::{APPLICATION_PID, APPLICATION_VID, REPORT_SIZE, USAGE, USAGE_PAGE},
     error::MicroError,
     input::{Bindings, LegacyContext, LegacyDecoder, Slot},
-    led::{diagnostic_frame, shutdown_frame},
-    rpc::{RpcClient, validate_firmware_version},
+    led::{diagnostic_frame, rainbow_slot_frame, shutdown_frame},
+    rpc::{PreviewEffect, PreviewLighting, PreviewZone, RpcClient, validate_firmware_version},
     wire::{JSON_CHANNEL, LOG_CHANNEL, REPORT_ID},
 };
 
@@ -25,6 +25,16 @@ const CAPTURE_BUDGET: usize = 128;
 const INPUT_BUDGET: usize = 128;
 const READ_SLICE: Duration = Duration::from_millis(50);
 const DRAIN_INTERVAL: Duration = Duration::from_millis(50);
+const RAINBOW_DWELL: Duration = Duration::from_millis(500);
+const RAINBOW_COLORS: [u32; 7] = [
+    0xff0000, // red
+    0xff7f00, // orange
+    0xffff00, // yellow
+    0x00ff00, // green
+    0x0000ff, // blue
+    0x4b0082, // indigo
+    0x9400d3, // violet
+];
 
 fn required_nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
@@ -44,6 +54,10 @@ pub struct MicroProbeOptions {
     #[serde(default)]
     pub test_pattern: bool,
     #[serde(default)]
+    pub rainbow_slot: Option<u8>,
+    #[serde(default)]
+    pub rainbow_backlight: bool,
+    #[serde(default)]
     pub health_check: bool,
 }
 
@@ -58,8 +72,36 @@ impl MicroProbeOptions {
         if self.test_pattern && !self.query {
             return Err("test_pattern requires query");
         }
-        if self.health_check && (self.query || self.read_keymap || self.test_pattern) {
-            return Err("health_check conflicts with query, read_keymap, and test_pattern");
+        if self.rainbow_slot.is_some() && !self.query {
+            return Err("rainbow_slot requires query");
+        }
+        if self.test_pattern && self.rainbow_slot.is_some() {
+            return Err("test_pattern conflicts with rainbow_slot");
+        }
+        if self.test_pattern && self.rainbow_backlight {
+            return Err("test_pattern conflicts with rainbow_backlight");
+        }
+        if self.rainbow_slot.is_some() && self.rainbow_backlight {
+            return Err("rainbow_slot conflicts with rainbow_backlight");
+        }
+        if let Some(slot) = self.rainbow_slot
+            && !(1..=6).contains(&slot)
+        {
+            return Err("rainbow_slot must be in 1..=6");
+        }
+        if self.rainbow_backlight && !self.query {
+            return Err("rainbow_backlight requires query");
+        }
+        if self.health_check
+            && (self.query
+                || self.read_keymap
+                || self.test_pattern
+                || self.rainbow_slot.is_some()
+                || self.rainbow_backlight)
+        {
+            return Err(
+                "health_check conflicts with query, read_keymap, test_pattern, rainbow_slot, and rainbow_backlight",
+            );
         }
         Ok(())
     }
@@ -190,6 +232,7 @@ impl std::error::Error for ReplayError {}
 
 pub trait ProbeIo {
     fn now(&self) -> Duration;
+    fn sleep(&mut self, duration: Duration);
     fn write(&mut self, report: &[u8]) -> Result<usize, HidError>;
     fn read(&mut self, max_len: usize, timeout: Duration) -> Result<Vec<u8>, HidError>;
 }
@@ -245,6 +288,10 @@ impl<'a> ClockedHid<'a> {
 impl ProbeIo for ClockedHid<'_> {
     fn now(&self) -> Duration {
         self.started.elapsed()
+    }
+
+    fn sleep(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
     }
 
     fn write(&mut self, report: &[u8]) -> Result<usize, HidError> {
@@ -348,6 +395,7 @@ fn run_micro_qualified(
             started,
         };
         let mut succeeded = true;
+        let mut cleanup_mode = None;
 
         if options.query {
             session.report.phase = "firmware".to_owned();
@@ -407,12 +455,31 @@ fn run_micro_qualified(
             if succeeded && options.test_pattern {
                 session.report.phase = "led_test".to_owned();
                 session.report.led_test_attempted = true;
+                cleanup_mode = Some(CleanupMode::Thstatus);
                 if let Err(error) = session.call(
                     "v.oai.thstatus",
                     Value::Null,
                     Some(&diagnostic_frame()),
                     false,
                 ) {
+                    result.error = Some(error);
+                    succeeded = false;
+                }
+            }
+            if succeeded && let Some(slot) = options.rainbow_slot {
+                session.report.phase = "led_test".to_owned();
+                session.report.led_test_attempted = true;
+                cleanup_mode = Some(CleanupMode::Thstatus);
+                if let Err(error) = run_rainbow_cycle(&mut session, slot - 1) {
+                    result.error = Some(error);
+                    succeeded = false;
+                }
+            }
+            if succeeded && options.rainbow_backlight {
+                session.report.phase = "led_test".to_owned();
+                session.report.led_test_attempted = true;
+                cleanup_mode = Some(CleanupMode::LightsPreview);
+                if let Err(error) = run_backlight_rainbow_cycle(&mut session) {
                     result.error = Some(error);
                     succeeded = false;
                 }
@@ -431,7 +498,16 @@ fn run_micro_qualified(
 
         if session.report.led_test_attempted && !session.report.write_failed {
             session.report.phase = "clear_leds".to_owned();
-            match session.call("v.oai.thstatus", Value::Null, Some(&shutdown_frame()), true) {
+            let clear = match cleanup_mode {
+                Some(CleanupMode::Thstatus) => {
+                    session.call("v.oai.thstatus", Value::Null, Some(&shutdown_frame()), true)
+                }
+                Some(CleanupMode::LightsPreview) => {
+                    session.call_lights_preview(&preview_off_frame(), true)
+                }
+                None => Ok(None),
+            };
+            match clear {
                 Ok(_) => session.report.led_clear_acknowledged = true,
                 Err(error) => {
                     session.report.cleanup_error = Some(error.clone());
@@ -454,6 +530,65 @@ fn run_micro_qualified(
     result.probe_succeeded = succeeded;
     result.read_only = result.report.output_attempts == 0;
     result
+}
+
+fn run_rainbow_cycle(session: &mut ProbeSession<'_>, slot_id: u8) -> Result<(), String> {
+    for color in RAINBOW_COLORS {
+        session.call(
+            "v.oai.thstatus",
+            Value::Null,
+            Some(&rainbow_slot_frame(slot_id, color)),
+            false,
+        )?;
+        session.sleep(RAINBOW_DWELL);
+    }
+    Ok(())
+}
+
+fn preview_color_frame(color: u32) -> PreviewLighting {
+    PreviewLighting {
+        backlight: PreviewZone {
+            effect: PreviewEffect::Solid,
+            brightness: 0.25,
+            speed: 0.2,
+            magic: 0.0,
+            color,
+        },
+        underglow: PreviewZone {
+            effect: PreviewEffect::Off,
+            brightness: 0.0,
+            speed: 0.0,
+            magic: 0.0,
+            color: 0,
+        },
+    }
+}
+
+fn preview_off_frame() -> PreviewLighting {
+    PreviewLighting {
+        backlight: PreviewZone {
+            effect: PreviewEffect::Off,
+            brightness: 0.0,
+            speed: 0.0,
+            magic: 0.0,
+            color: 0,
+        },
+        underglow: PreviewZone {
+            effect: PreviewEffect::Off,
+            brightness: 0.0,
+            speed: 0.0,
+            magic: 0.0,
+            color: 0,
+        },
+    }
+}
+
+fn run_backlight_rainbow_cycle(session: &mut ProbeSession<'_>) -> Result<(), String> {
+    for color in RAINBOW_COLORS {
+        session.call_lights_preview(&preview_color_frame(color), false)?;
+        session.sleep(RAINBOW_DWELL);
+    }
+    Ok(())
 }
 
 /// Enumerates and opens exactly one candidate. Live callers must invoke this in
@@ -613,13 +748,42 @@ struct ProbeSession<'a> {
     started: Duration,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CleanupMode {
+    Thstatus,
+    LightsPreview,
+}
+
 impl ProbeSession<'_> {
+    fn sleep(&mut self, duration: Duration) {
+        self.io.sleep(duration);
+    }
+
     fn call(
         &mut self,
         method: &str,
         params: Value,
         led: Option<&[super::led::LedEntry; 6]>,
         cleanup: bool,
+    ) -> Result<Option<super::value::JsonValue>, String> {
+        self.call_with(cleanup, |rpc| match led {
+            Some(entries) => rpc.begin_led(entries),
+            None => rpc.begin(method, &params),
+        })
+    }
+
+    fn call_lights_preview(
+        &mut self,
+        preview: &PreviewLighting,
+        cleanup: bool,
+    ) -> Result<Option<super::value::JsonValue>, String> {
+        self.call_with(cleanup, |rpc| rpc.begin_lights_preview(preview))
+    }
+
+    fn call_with(
+        &mut self,
+        cleanup: bool,
+        begin: impl FnOnce(&mut RpcClient) -> Result<super::rpc::PreparedRequest, MicroError>,
     ) -> Result<Option<super::value::JsonValue>, String> {
         let drain_complete = if self.rpc.next_request_id() != Some(101) {
             self.drain(cleanup)?
@@ -629,11 +793,7 @@ impl ProbeSession<'_> {
         if cleanup {
             self.rpc.abandon_pending();
         }
-        let request = match led {
-            Some(entries) => self.rpc.begin_led(entries),
-            None => self.rpc.begin(method, &params),
-        }
-        .map_err(|error| error.to_string())?;
+        let request = begin(self.rpc).map_err(|error| error.to_string())?;
         for packet in &request.reports {
             self.report.output_attempts += 1;
             let count = match self.io.write(packet) {
@@ -918,6 +1078,10 @@ mod tests {
             self.now
         }
 
+        fn sleep(&mut self, duration: Duration) {
+            self.now += duration;
+        }
+
         fn write(&mut self, report: &[u8]) -> Result<usize, HidError> {
             self.writes.push(report.to_vec());
             while self
@@ -1054,6 +1218,92 @@ mod tests {
         )
     }
 
+    fn rainbow_flow_fake(
+        include_cleanup_reply: bool,
+        failing_color_request_id: Option<u64>,
+    ) -> (Fake, usize) {
+        let rainbow_reports = RpcClient::new()
+            .begin_led(&rainbow_slot_frame(2, RAINBOW_COLORS[0]))
+            .unwrap()
+            .reports
+            .len();
+        let cleanup_reports = RpcClient::new()
+            .begin_led(&shutdown_frame())
+            .unwrap()
+            .reports
+            .len();
+        let mut replies = VecDeque::from([
+            (1, response(101, json!({"version":"0.6.3"}))),
+            (2, response(102, json!({"connected":true}))),
+        ]);
+        let mut writes = 2;
+        for request_id in 103..=109 {
+            writes += rainbow_reports;
+            if Some(request_id) != failing_color_request_id {
+                replies.push_back((writes, response(request_id, Value::Null)));
+            }
+        }
+        let cleanup_complete = writes + cleanup_reports;
+        if include_cleanup_reply {
+            replies.push_back((cleanup_complete, response(110, Value::Null)));
+        }
+        (
+            Fake {
+                now: Duration::ZERO,
+                incoming: VecDeque::new(),
+                writes: Vec::new(),
+                write_count: None,
+                reply_after_writes: replies,
+                fail_read_after_writes: None,
+                read_failure: None,
+            },
+            writes,
+        )
+    }
+
+    fn backlight_rainbow_flow_fake(
+        include_cleanup_reply: bool,
+        failing_color_request_id: Option<u64>,
+    ) -> (Fake, usize) {
+        let preview_reports = RpcClient::new()
+            .begin_lights_preview(&preview_color_frame(RAINBOW_COLORS[0]))
+            .unwrap()
+            .reports
+            .len();
+        let cleanup_reports = RpcClient::new()
+            .begin_lights_preview(&preview_off_frame())
+            .unwrap()
+            .reports
+            .len();
+        let mut replies = VecDeque::from([
+            (1, response(101, json!({"version":"0.6.3"}))),
+            (2, response(102, json!({"connected":true}))),
+        ]);
+        let mut writes = 2;
+        for request_id in 103..=109 {
+            writes += preview_reports;
+            if Some(request_id) != failing_color_request_id {
+                replies.push_back((writes, response(request_id, Value::Null)));
+            }
+        }
+        let cleanup_complete = writes + cleanup_reports;
+        if include_cleanup_reply {
+            replies.push_back((cleanup_complete, response(110, Value::Null)));
+        }
+        (
+            Fake {
+                now: Duration::ZERO,
+                incoming: VecDeque::new(),
+                writes: Vec::new(),
+                write_count: None,
+                reply_after_writes: replies,
+                fail_read_after_writes: None,
+                read_failure: None,
+            },
+            writes,
+        )
+    }
+
     #[test]
     fn health_check_is_transport_free_and_options_are_validated_first() {
         let result = run_micro_health_check(MicroProbeOptions {
@@ -1093,6 +1343,61 @@ mod tests {
             MicroProbeOptions {
                 health_check: true,
                 query: true,
+                ..MicroProbeOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MicroProbeOptions {
+                rainbow_slot: Some(1),
+                ..MicroProbeOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MicroProbeOptions {
+                query: true,
+                rainbow_slot: Some(7),
+                ..MicroProbeOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MicroProbeOptions {
+                query: true,
+                test_pattern: true,
+                rainbow_slot: Some(3),
+                ..MicroProbeOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MicroProbeOptions {
+                rainbow_backlight: true,
+                ..MicroProbeOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MicroProbeOptions {
+                query: true,
+                test_pattern: true,
+                rainbow_backlight: true,
+                ..MicroProbeOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MicroProbeOptions {
+                query: true,
+                rainbow_slot: Some(1),
+                rainbow_backlight: true,
                 ..MicroProbeOptions::default()
             }
             .validate()
@@ -1159,6 +1464,9 @@ mod tests {
         impl ProbeIo for EarlyIdle {
             fn now(&self) -> Duration {
                 self.now
+            }
+            fn sleep(&mut self, duration: Duration) {
+                self.now += duration;
             }
             fn write(&mut self, _: &[u8]) -> Result<usize, HidError> {
                 panic!("quiet drain must not write");
@@ -1495,6 +1803,9 @@ mod tests {
             fn now(&self) -> Duration {
                 self.inner.now()
             }
+            fn sleep(&mut self, duration: Duration) {
+                self.inner.sleep(duration);
+            }
             fn write(&mut self, report: &[u8]) -> Result<usize, HidError> {
                 self.inner.write(report)
             }
@@ -1647,6 +1958,292 @@ mod tests {
         assert!(!result.report.led_clear_acknowledged);
         assert!(result.report.cleanup_error.is_some());
         assert_eq!(result.error.as_deref(), Some("Os { op: Read, code: 9 }"));
+    }
+
+    #[test]
+    fn rainbow_slot_cycles_selected_protocol_led_only_with_expected_dwell() {
+        let (mut fake, _) = rainbow_flow_fake(true, None);
+        let result = run_qualified(
+            &mut fake,
+            &descriptor(),
+            MicroProbeOptions {
+                query: true,
+                rainbow_slot: Some(3),
+                capture_ms: 0,
+                ..Default::default()
+            },
+        );
+        assert!(result.probe_succeeded, "{:?}", result.error);
+        assert!(result.report.led_test_attempted);
+        assert!(result.report.led_clear_acknowledged);
+        assert_eq!(result.report.output_attempts, fake.writes.len());
+        assert_eq!(result.report.output_reports, fake.writes.len());
+        assert_eq!(result.report.output_bytes, fake.writes.len() * REPORT_SIZE);
+        assert_eq!(result.report.elapsed_ms, 3_950);
+        let mut decoder = crate::devices::micro::wire::Decoder::new();
+        let mut methods = Vec::new();
+        let mut params = Vec::new();
+        for report in &fake.writes[2..] {
+            if let Some(message) = decoder.feed(report, Duration::ZERO).unwrap() {
+                methods.push(message.as_map()["method"].clone());
+                params.push(message.as_map()["params"].clone());
+            }
+        }
+        assert_eq!(methods.len(), 8);
+        assert!(
+            methods[..7]
+                .iter()
+                .all(|method| *method == json!("v.oai.thstatus"))
+        );
+        assert_eq!(methods[7], json!("v.oai.thstatus"));
+        for (index, expected_color) in RAINBOW_COLORS.into_iter().enumerate() {
+            let frame = params[index].as_array().unwrap();
+            assert_eq!(frame.len(), 6);
+            for (slot, entry) in frame.iter().enumerate() {
+                assert_eq!(entry["id"], json!(slot as u8));
+                assert_eq!(entry["e"], json!(1));
+                assert_eq!(entry["s"], json!(0.2));
+                assert_eq!(entry["b"], json!(0.25));
+                if slot == 2 {
+                    assert_eq!(entry["c"], json!(expected_color));
+                } else {
+                    assert_eq!(entry["c"], json!(0));
+                }
+            }
+        }
+        assert_eq!(
+            params[7],
+            serde_json::to_value(shutdown_frame()).expect("shutdown frame")
+        );
+    }
+
+    #[test]
+    fn rainbow_slot_error_stops_later_colors_and_still_attempts_clear() {
+        let (mut fake, _) = rainbow_flow_fake(true, Some(106));
+        let result = run_qualified(
+            &mut fake,
+            &descriptor(),
+            MicroProbeOptions {
+                query: true,
+                rainbow_slot: Some(3),
+                capture_ms: 0,
+                ..Default::default()
+            },
+        );
+        assert!(!result.probe_succeeded);
+        assert!(result.report.led_test_attempted);
+        assert!(result.report.led_clear_acknowledged);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("No device response to v.oai.thstatus")
+        );
+        let mut decoder = crate::devices::micro::wire::Decoder::new();
+        let mut ids = Vec::new();
+        for report in &fake.writes[2..] {
+            if let Some(message) = decoder.feed(report, Duration::ZERO).unwrap() {
+                ids.push(message.as_map()["id"].clone());
+            }
+        }
+        assert_eq!(
+            ids,
+            vec![json!(103), json!(104), json!(105), json!(106), json!(107)]
+        );
+    }
+
+    #[test]
+    fn rainbow_short_write_stops_without_cleanup_write() {
+        struct ShortWriteAt {
+            inner: Fake,
+            fail_at: usize,
+            writes: usize,
+        }
+        impl ProbeIo for ShortWriteAt {
+            fn now(&self) -> Duration {
+                self.inner.now()
+            }
+            fn sleep(&mut self, duration: Duration) {
+                self.inner.sleep(duration);
+            }
+            fn write(&mut self, report: &[u8]) -> Result<usize, HidError> {
+                self.writes += 1;
+                if self.writes == self.fail_at {
+                    self.inner.writes.push(report.to_vec());
+                    return Ok(REPORT_SIZE - 1);
+                }
+                self.inner.write(report)
+            }
+            fn read(&mut self, max_len: usize, timeout: Duration) -> Result<Vec<u8>, HidError> {
+                self.inner.read(max_len, timeout)
+            }
+        }
+        let (fake, _) = rainbow_flow_fake(true, None);
+        let mut io = ShortWriteAt {
+            inner: fake,
+            fail_at: 4,
+            writes: 0,
+        };
+        let result = run_qualified(
+            &mut io,
+            &descriptor(),
+            MicroProbeOptions {
+                query: true,
+                rainbow_slot: Some(2),
+                capture_ms: 0,
+                ..Default::default()
+            },
+        );
+        assert!(!result.probe_succeeded);
+        assert!(result.report.led_test_attempted);
+        assert!(!result.report.led_clear_acknowledged);
+        assert!(result.report.write_failed);
+        assert!(result.report.cleanup_error.is_none());
+        assert_eq!(result.error.as_deref(), Some("Short HID write: 63"));
+        assert_eq!(result.report.output_attempts, io.inner.writes.len());
+        assert_eq!(
+            result.report.output_reports + 1,
+            result.report.output_attempts
+        );
+    }
+
+    #[test]
+    fn rainbow_backlight_cycles_preview_and_cleans_up_with_preview_off() {
+        let (mut fake, _) = backlight_rainbow_flow_fake(true, None);
+        let result = run_qualified(
+            &mut fake,
+            &descriptor(),
+            MicroProbeOptions {
+                query: true,
+                rainbow_backlight: true,
+                capture_ms: 0,
+                ..Default::default()
+            },
+        );
+        assert!(result.probe_succeeded, "{:?}", result.error);
+        assert!(result.report.led_test_attempted);
+        assert!(result.report.led_clear_acknowledged);
+        assert_eq!(result.report.elapsed_ms, 3_950);
+        let mut decoder = crate::devices::micro::wire::Decoder::new();
+        let mut methods = Vec::new();
+        let mut params = Vec::new();
+        for report in &fake.writes[2..] {
+            if let Some(message) = decoder.feed(report, Duration::ZERO).unwrap() {
+                methods.push(message.as_map()["method"].clone());
+                params.push(message.as_map()["params"].clone());
+            }
+        }
+        assert_eq!(methods.len(), 8);
+        assert!(
+            methods[..7]
+                .iter()
+                .all(|method| *method == json!("lights.preview"))
+        );
+        assert_eq!(methods[7], json!("lights.preview"));
+        for (index, expected_color) in RAINBOW_COLORS.into_iter().enumerate() {
+            let value = params[index].as_object().unwrap();
+            assert_eq!(value["backlight"]["effect"], json!("solid"));
+            assert_eq!(value["backlight"]["brightness"], json!(0.25));
+            assert_eq!(value["backlight"]["speed"], json!(0.2));
+            assert_eq!(value["backlight"]["magic"], json!(0.0));
+            assert_eq!(value["backlight"]["color"], json!(expected_color));
+            assert_eq!(value["underglow"]["effect"], json!("off"));
+            assert_eq!(value["underglow"]["brightness"], json!(0.0));
+            assert_eq!(value["underglow"]["speed"], json!(0.0));
+            assert_eq!(value["underglow"]["magic"], json!(0.0));
+            assert_eq!(value["underglow"]["color"], json!(0));
+        }
+        assert_eq!(
+            params[7],
+            json!({
+                "backlight":{"effect":"off","brightness":0.0,"speed":0.0,"magic":0.0,"color":0},
+                "underglow":{"effect":"off","brightness":0.0,"speed":0.0,"magic":0.0,"color":0}
+            })
+        );
+    }
+
+    #[test]
+    fn rainbow_backlight_timeout_stops_later_colors_and_cleanup_uses_preview() {
+        let (mut fake, _) = backlight_rainbow_flow_fake(true, Some(106));
+        let result = run_qualified(
+            &mut fake,
+            &descriptor(),
+            MicroProbeOptions {
+                query: true,
+                rainbow_backlight: true,
+                capture_ms: 0,
+                ..Default::default()
+            },
+        );
+        assert!(!result.probe_succeeded);
+        assert!(result.report.led_test_attempted);
+        assert!(result.report.led_clear_acknowledged);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("No device response to lights.preview")
+        );
+        let mut decoder = crate::devices::micro::wire::Decoder::new();
+        let mut methods = Vec::new();
+        for report in &fake.writes[2..] {
+            if let Some(message) = decoder.feed(report, Duration::ZERO).unwrap() {
+                methods.push(message.as_map()["method"].clone());
+            }
+        }
+        assert_eq!(methods, vec![json!("lights.preview"); 5]);
+    }
+
+    #[test]
+    fn rainbow_backlight_short_write_skips_cleanup_preview() {
+        struct ShortWriteAt {
+            inner: Fake,
+            fail_at: usize,
+            writes: usize,
+        }
+        impl ProbeIo for ShortWriteAt {
+            fn now(&self) -> Duration {
+                self.inner.now()
+            }
+            fn sleep(&mut self, duration: Duration) {
+                self.inner.sleep(duration);
+            }
+            fn write(&mut self, report: &[u8]) -> Result<usize, HidError> {
+                self.writes += 1;
+                if self.writes == self.fail_at {
+                    self.inner.writes.push(report.to_vec());
+                    return Ok(REPORT_SIZE - 1);
+                }
+                self.inner.write(report)
+            }
+            fn read(&mut self, max_len: usize, timeout: Duration) -> Result<Vec<u8>, HidError> {
+                self.inner.read(max_len, timeout)
+            }
+        }
+        let (fake, _) = backlight_rainbow_flow_fake(true, None);
+        let mut io = ShortWriteAt {
+            inner: fake,
+            fail_at: 4,
+            writes: 0,
+        };
+        let result = run_qualified(
+            &mut io,
+            &descriptor(),
+            MicroProbeOptions {
+                query: true,
+                rainbow_backlight: true,
+                capture_ms: 0,
+                ..Default::default()
+            },
+        );
+        assert!(!result.probe_succeeded);
+        assert!(result.report.led_test_attempted);
+        assert!(!result.report.led_clear_acknowledged);
+        assert!(result.report.write_failed);
+        assert!(result.report.cleanup_error.is_none());
+        assert_eq!(result.error.as_deref(), Some("Short HID write: 63"));
+        let mut decoder = crate::devices::micro::wire::Decoder::new();
+        for report in &io.inner.writes[2..] {
+            if let Some(message) = decoder.feed(report, Duration::ZERO).unwrap() {
+                assert_eq!(message.as_map()["method"], json!("lights.preview"));
+            }
+        }
     }
 
     #[test]

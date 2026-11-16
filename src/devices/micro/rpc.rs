@@ -16,6 +16,36 @@ pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(4);
 pub const INPUT_QUEUE_CAPACITY: usize = 128;
 pub const FIRST_REQUEST_ID: u64 = 101;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreviewEffect {
+    Off,
+    Solid,
+}
+
+impl PreviewEffect {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Solid => "solid",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct PreviewZone {
+    pub(super) effect: PreviewEffect,
+    pub(super) brightness: f64,
+    pub(super) speed: f64,
+    pub(super) magic: f64,
+    pub(super) color: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct PreviewLighting {
+    pub(super) backlight: PreviewZone,
+    pub(super) underglow: PreviewZone,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRequest {
     pub id: u64,
@@ -114,6 +144,16 @@ impl RpcClient {
             append_json(&mut json, params).map_err(|_| MicroError::Serialization)?;
         }
         self.prepare_serialized(method, &json)
+    }
+
+    /// Diagnostic-only typed constructor for `lights.preview`.
+    pub(super) fn begin_lights_preview(
+        &mut self,
+        preview: &PreviewLighting,
+    ) -> Result<PreparedRequest, MicroError> {
+        let mut json = String::new();
+        append_preview_params(&mut json, preview).map_err(|_| MicroError::Serialization)?;
+        self.prepare_serialized("lights.preview", &json)
     }
 
     /// Uses the required `id,c,b,e,s` ordering for typed LED entries.
@@ -318,6 +358,54 @@ fn append_led_params(output: &mut String, params: &Value) -> Result<(), ()> {
         output.push('}');
     }
     output.push(']');
+    Ok(())
+}
+
+fn append_preview_zone(output: &mut String, zone: &PreviewZone) -> Result<(), ()> {
+    if !zone.brightness.is_finite()
+        || !zone.speed.is_finite()
+        || !zone.magic.is_finite()
+        || !(0.0..=1.0).contains(&zone.brightness)
+        || !(0.0..=1.0).contains(&zone.speed)
+        || !(0.0..=1.0).contains(&zone.magic)
+        || zone.color > 0x00ff_ffff
+    {
+        return Err(());
+    }
+    output.push('{');
+    append_json_string(output, "effect")?;
+    output.push(':');
+    append_json_string(output, zone.effect.name())?;
+    output.push(',');
+    append_json_string(output, "brightness")?;
+    output.push(':');
+    append_json(output, &Value::from(zone.brightness))?;
+    output.push(',');
+    append_json_string(output, "speed")?;
+    output.push(':');
+    append_json(output, &Value::from(zone.speed))?;
+    output.push(',');
+    append_json_string(output, "magic")?;
+    output.push(':');
+    append_json(output, &Value::from(zone.magic))?;
+    output.push(',');
+    append_json_string(output, "color")?;
+    output.push(':');
+    append_json(output, &Value::from(zone.color))?;
+    output.push('}');
+    Ok(())
+}
+
+fn append_preview_params(output: &mut String, preview: &PreviewLighting) -> Result<(), ()> {
+    output.push('{');
+    append_json_string(output, "backlight")?;
+    output.push(':');
+    append_preview_zone(output, &preview.backlight)?;
+    output.push(',');
+    append_json_string(output, "underglow")?;
+    output.push(':');
+    append_preview_zone(output, &preview.underglow)?;
+    output.push('}');
     Ok(())
 }
 

@@ -101,7 +101,7 @@ fn main() {
         use copilot_controller::native::windows_worker::{DiagnosticRequest, probe};
         let payload = json!({
             "capture_ms": 0, "query": false, "read_keymap": false,
-            "test_pattern": false, "health_check": false,
+            "test_pattern": false, "rainbow_slot": null, "rainbow_backlight": false, "health_check": false,
         });
         let result = probe(
             &DiagnosticRequest {

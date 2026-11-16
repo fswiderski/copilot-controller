@@ -16,6 +16,8 @@ use super::Output;
 
 pub(super) const MICRO_KIND: &str = "micro_hid_probe";
 pub(super) const AKP03_KIND: &str = "akp03_hid_probe";
+const MICRO_RAINBOW_DWELL_MS: u64 = 3_500;
+const MICRO_RAINBOW_RPC_AND_CLEANUP_MS: u64 = 32_500;
 
 #[derive(Clone, Debug)]
 pub(super) enum Options {
@@ -52,7 +54,14 @@ impl Options {
         }
         Duration::from_millis(match self {
             Self::Micro(options) => {
-                u64::from(options.capture_ms) + 20_000 + if options.read_keymap { 5_000 } else { 0 }
+                u64::from(options.capture_ms)
+                    + 20_000
+                    + if options.read_keymap { 5_000 } else { 0 }
+                    + if options.rainbow_slot.is_some() || options.rainbow_backlight {
+                        MICRO_RAINBOW_DWELL_MS + MICRO_RAINBOW_RPC_AND_CLEANUP_MS
+                    } else {
+                        0
+                    }
             }
             Self::Akp03(options) => u64::from(options.capture_ms) + 15_000,
         })
@@ -243,6 +252,19 @@ pub(super) fn parse(args: &[String], micro: bool) -> Result<Options, String> {
             (Options::Micro(options), "--query") => options.query = true,
             (Options::Micro(options), "--read-keymap") => options.read_keymap = true,
             (Options::Micro(options), "--test-pattern") => options.test_pattern = true,
+            (Options::Micro(options), "--rainbow-slot") => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| option_error("rainbow slot is required"))?;
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(option_error("rainbow slot must be unsigned ASCII decimal"));
+                }
+                let slot: u8 = value
+                    .parse()
+                    .map_err(|_| option_error("rainbow slot is out of range"))?;
+                options.rainbow_slot = Some(slot);
+            }
+            (Options::Micro(options), "--rainbow-backlight") => options.rainbow_backlight = true,
             (Options::Micro(options), "--health-check") => options.health_check = true,
             (Options::Akp03(options), "--initialize") => options.initialize = true,
             (Options::Akp03(options), "--test-pattern") => options.test_pattern = true,
@@ -341,6 +363,8 @@ fn decode_options(payload: Value, micro: bool) -> Result<Options, worker::Diagno
             "query",
             "read_keymap",
             "test_pattern",
+            "rainbow_slot",
+            "rainbow_backlight",
             "health_check",
         ]
     } else {

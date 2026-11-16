@@ -11,7 +11,7 @@ use super::input::{
     StrictEventKind,
 };
 use super::led::{self, LedStatus};
-use super::rpc::{self, RpcClient};
+use super::rpc::{self, PreviewEffect, PreviewLighting, PreviewZone, RpcClient};
 use super::wire::{self, Decoder, Report};
 
 fn ms(milliseconds: u64) -> Duration {
@@ -462,6 +462,10 @@ fn rpc_admission_matching_queue_and_deadline() {
         client.begin("fs.read", &json!({"file":"keymap.json","extra":0})),
         Err(MicroError::RestrictedFilesystemRead)
     );
+    assert_eq!(
+        client.begin("lights.preview", &json!({})),
+        Err(MicroError::MethodNotAllowlisted)
+    );
     let request = client.begin("sys.version", &Value::Null).unwrap();
     assert_eq!(request.id, 101);
     assert_eq!(
@@ -524,6 +528,7 @@ fn rpc_admission_matching_queue_and_deadline() {
             .feed_message(object(json!({"m":"v.oai.rad","n":i})))
             .unwrap();
     }
+
     client
         .feed_message(object(json!({"m":"unknown","n":999})))
         .unwrap();
@@ -542,6 +547,162 @@ fn rpc_admission_matching_queue_and_deadline() {
     client.discard_connection();
     assert_eq!(client.queued_input_count(), 0);
     assert_eq!(client.begin("sys.version", &Value::Null).unwrap().id, 101);
+}
+
+#[test]
+fn typed_lights_preview_builder_emits_exact_shape_while_generic_call_remains_blocked() {
+    let mut client = RpcClient::new();
+    let preview = PreviewLighting {
+        backlight: PreviewZone {
+            effect: PreviewEffect::Solid,
+            brightness: 0.25,
+            speed: 0.2,
+            magic: 0.0,
+            color: 0xff00aa,
+        },
+        underglow: PreviewZone {
+            effect: PreviewEffect::Off,
+            brightness: 0.0,
+            speed: 0.0,
+            magic: 0.0,
+            color: 0,
+        },
+    };
+    let request = client.begin_lights_preview(&preview).unwrap();
+    assert_eq!(request.id, 101);
+    let text = String::from_utf8(payload(&request.reports)).unwrap();
+    assert_eq!(
+        text,
+        r#"{"method":"lights.preview","params":{"backlight":{"effect":"solid","brightness":0.25,"speed":0.2,"magic":0.0,"color":16711850},"underglow":{"effect":"off","brightness":0.0,"speed":0.0,"magic":0.0,"color":0}},"id":101}"#
+    );
+    assert_eq!(
+        client.begin("lights.preview", &json!({"backlight":{}})),
+        Err(MicroError::MethodNotAllowlisted)
+    );
+}
+
+#[test]
+fn typed_lights_preview_validates_domain_before_consuming_request_id() {
+    let mut client = RpcClient::new();
+    let invalids = [
+        PreviewLighting {
+            backlight: PreviewZone {
+                effect: PreviewEffect::Solid,
+                brightness: f64::NAN,
+                speed: 0.2,
+                magic: 0.0,
+                color: 0x000000,
+            },
+            underglow: PreviewZone {
+                effect: PreviewEffect::Off,
+                brightness: 0.0,
+                speed: 0.0,
+                magic: 0.0,
+                color: 0,
+            },
+        },
+        PreviewLighting {
+            backlight: PreviewZone {
+                effect: PreviewEffect::Solid,
+                brightness: -0.01,
+                speed: 0.2,
+                magic: 0.0,
+                color: 0x000000,
+            },
+            underglow: PreviewZone {
+                effect: PreviewEffect::Off,
+                brightness: 0.0,
+                speed: 0.0,
+                magic: 0.0,
+                color: 0,
+            },
+        },
+        PreviewLighting {
+            backlight: PreviewZone {
+                effect: PreviewEffect::Solid,
+                brightness: 0.25,
+                speed: 1.01,
+                magic: 0.0,
+                color: 0x000000,
+            },
+            underglow: PreviewZone {
+                effect: PreviewEffect::Off,
+                brightness: 0.0,
+                speed: 0.0,
+                magic: 0.0,
+                color: 0,
+            },
+        },
+        PreviewLighting {
+            backlight: PreviewZone {
+                effect: PreviewEffect::Solid,
+                brightness: 0.25,
+                speed: 0.2,
+                magic: -0.01,
+                color: 0x000000,
+            },
+            underglow: PreviewZone {
+                effect: PreviewEffect::Off,
+                brightness: 0.0,
+                speed: 0.0,
+                magic: 0.0,
+                color: 0,
+            },
+        },
+        PreviewLighting {
+            backlight: PreviewZone {
+                effect: PreviewEffect::Solid,
+                brightness: 0.25,
+                speed: 0.2,
+                magic: 0.0,
+                color: 0x01_000000,
+            },
+            underglow: PreviewZone {
+                effect: PreviewEffect::Off,
+                brightness: 0.0,
+                speed: 0.0,
+                magic: 0.0,
+                color: 0,
+            },
+        },
+    ];
+    for preview in invalids {
+        assert_eq!(
+            client.begin_lights_preview(&preview),
+            Err(MicroError::Serialization)
+        );
+        assert_eq!(client.next_request_id(), Some(101));
+        assert_eq!(
+            client.begin("sys.version", &Value::Null).unwrap().id,
+            101,
+            "invalid preview must not consume id or create in-flight request"
+        );
+        client.discard_connection();
+    }
+}
+
+#[test]
+fn typed_lights_preview_accepts_inclusive_numeric_boundaries() {
+    let mut client = RpcClient::new();
+    let request = client
+        .begin_lights_preview(&PreviewLighting {
+            backlight: PreviewZone {
+                effect: PreviewEffect::Solid,
+                brightness: 1.0,
+                speed: 1.0,
+                magic: 1.0,
+                color: 0x00ff_ffff,
+            },
+            underglow: PreviewZone {
+                effect: PreviewEffect::Off,
+                brightness: 0.0,
+                speed: 0.0,
+                magic: 0.0,
+                color: 0,
+            },
+        })
+        .unwrap();
+    assert_eq!(request.id, 101);
 }
 
 #[test]
