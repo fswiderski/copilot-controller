@@ -20,7 +20,9 @@
 //! across exact logical HID bus nodes (never past unknown/missing transport),
 //! but cannot supply a documented native interface number or original report
 //! descriptor (the report-descriptor IOCTL is for HID minidrivers, not applications).
-//! The macOS backend reads those only from native properties when available.
+//! The macOS backend reads those from native properties: direct IOHID properties
+//! first, then a bounded IOService-parent walk for `IOUSBHostInterface`
+//! `bInterfaceNumber` with exact VID/PID identity gating.
 //! Consumers requiring either artifact fail closed
 //! with [`HidError::EvidenceUnavailable`] rather than infer it from parsed caps or
 //! a device path.
