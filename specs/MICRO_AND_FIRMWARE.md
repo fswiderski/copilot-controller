@@ -46,9 +46,27 @@ verified this unit's USB vendor interface `2` and exact descriptor, acquired
 `IOHIDDeviceOpen(..., 0x1)` with native status `0`, and explicitly released it
 with close status `0`. The run performed zero output attempts, output reports,
 output bytes, or input reads, and registered no report callbacks. This proves
-only that the exclusive HID open/release succeeded on this unit. No independent
-second-opener challenge was performed; exclusion of already-open or raw-USB
-clients remains unverified. Saved configuration writes remain unauthorized.
+only that the exclusive HID open/release succeeded on this unit. That first
+run did not include a second-opener challenge; the later HID-only test below
+provides separate evidence. Raw-USB exclusion and reliable keymap restoration
+remain unverified, so saved configuration writes remain unauthorized.
+
+Later that day, the separately reviewed `micro_hid_contention_lab` ran on the
+same macOS ARM64 host and Creator Micro 2, using independent processes and
+only fixed `sys.version` queries with distinct request IDs:
+
+| Challenge | While another process held seizure | Control after release |
+|---|---|---|
+| Already-open normal HID client | `IOHIDDeviceSetReport` rejected with `kIOReturnExclusiveAccess` (`0xe00002c5`, signed `-536870203`) | Same handle sent successfully and received firmware `0.6.3` |
+| Newly opening normal HID client | `IOHIDDeviceOpen` rejected with the same exclusive-access error | New open and version query succeeded |
+
+The already-open client also completed a version query before seizure.
+The seizer passively watched for the competing request's ID without writing;
+it received no matching reply. All explicit close statuses were `0`.
+The native write rejection, not the missing reply, establishes exclusion
+for this tested existing HID handle. These observations cover this host,
+unit, firmware, and HID access path only, not raw-USB clients or other
+platforms. No saved configuration, lighting, or firmware was changed.
 
 On the same date, a query-only keymap/status read reported
 `activeProfile=0`, profile name `Default`, `currentLayer_index=1`, layers
@@ -141,7 +159,7 @@ Use the native bus classification, not a name/path heuristic.
 
 Opening filters to the exact VID/PID/page/usage tuple and an optional required transport, then requires **exactly one** candidate. Do not first discard unknown descriptors and pick one of several remaining devices.
 
-Open the enumerated exact device path. Ordinary macOS probes use nonexclusive opening, preserving keyboard/mouse operation; the explicit zero-report exclusive check below is the sole exception and targets only vendor interface `2`. Re-read opened identity and require VID, PID, interface number, bus classification, and path to match. Do not require reopened usage to equal selected usage: macOS may expose the keyboard primary usage for a composite path.
+Open the enumerated exact device path. Ordinary macOS probes use nonexclusive opening, preserving keyboard/mouse operation; the explicit zero-report exclusive check and separate contention lab target only vendor interface `2` when seizing. Re-read opened identity and require VID, PID, interface number, bus classification, and path to match. Do not require reopened usage to equal selected usage: macOS may expose the keyboard primary usage for a composite path.
 
 Read at most `1024` descriptor bytes. Before sending any report, match exact descriptor bytes against these qualified profiles. Comparing actual descriptor length and SHA-256 provides the required byte-exact qualification without shipping descriptor assets:
 
@@ -177,6 +195,29 @@ Diagnostics and firmware maintenance share a nonblocking, per-effective-user fil
 - Acquire an exclusive nonblocking lock and retain the handle throughout the operation.
 
 Failure means another participating controller operation owns the device or the lease is unsafe. This lock does not exclude unrelated software. Windows native diagnostics do not invoke this lease.
+
+### 2.5 Explicit HID-only contention lab
+
+`cargo run --release --example micro_hid_contention_lab` explicitly runs the
+separate macOS ARM64 lab. Building or testing the example does not access
+hardware. The example is not a production CLI route and does not change
+production capabilities, admission, or local leases. Its independently opened
+native handles test OS exclusion, not rejection by the cooperative file lock.
+Do not run it alongside other controller operations.
+
+The lab qualifies the exact USB vendor-interface-2 identity and descriptor
+before opening and revalidates the opened identity. It sends only single-frame
+`sys.version` queries, uses parent-assigned phase-unique IDs, and arms the
+owner's zero-write observer before the competitor sends. Explicit native
+errors and before/after controls distinguish exclusion from missing responses.
+Helper lifetimes, IPC size, phase waits, and child cleanup are bounded.
+Hardware-free subprocess fixtures exercise failed initialization, close-then-
+hang cleanup, watchdog expiry, and EOF shutdown.
+
+This lab has no raw-USB, configuration, lighting, or firmware-write capability.
+A successful native write without a correlated response is inconclusive,
+not proof that writes were excluded. These diagnostics do not authorize
+saved-keymap changes or establish a reliable restoration procedure.
 
 ## 3. HID wire framing
 
