@@ -45,7 +45,7 @@ Usage: copilot-controller <command>
   micro-preview
   micro-probe [--capture-ms <0..30000>] [--query] [--read-keymap]
               [--test-pattern] [--rainbow-slot <1..6>]
-              [--rainbow-backlight] [--health-check]
+              [--rainbow-backlight] [--health-check] [--exclusive-check]
   akp03-doctor [--discover (unavailable)]
   akp03-decode <hex> [--rev2]
   akp03-preview
@@ -66,7 +66,12 @@ and LED tests require --query. --rainbow-slot targets one of six protocol slot
 LEDs (v.oai.thstatus ids 0..5), not all physical buttons. --rainbow-backlight
 is a temporary whole-keypad preview (lights.preview) with underglow forced off.
 AKP03 display test requires --initialize. --health-check conflicts with these
-opt-ins and performs no device access.
+opt-ins and performs no device access. --exclusive-check is macOS-only and
+requires --capture-ms 0 with no query/keymap/pattern/rainbow/health options;
+it verifies the exact USB vendor interface-2 descriptor, attempts
+IOHIDDeviceOpen(...,0x1), then closes immediately (no reports/callbacks).
+Successful seize here does not prove raw-USB writer exclusion or
+firmware/keymap write permission.
 Windows HID descriptor evidence is unavailable, so HID live probes fail closed;
 macOS HID requires its device feature and exact native descriptor evidence;
 IOKit access/writes require the private supervised-child capability. Linux live

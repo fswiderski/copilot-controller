@@ -28,6 +28,15 @@ single-unit observation of temporary whole-keypad lighting only, not
 individual-key control, other firmware/platforms, or broad hardware
 qualification. No saved keymap, configuration file, or firmware was changed.
 
+On the same date, a macOS ARM64 `micro-probe --exclusive-check --capture-ms 0`
+verified this unit's USB vendor interface `2` and exact descriptor, acquired
+`IOHIDDeviceOpen(..., 0x1)` with native status `0`, and explicitly released it
+with close status `0`. The run performed zero output attempts, output reports,
+output bytes, or input reads, and registered no report callbacks. This proves
+only that the exclusive HID open/release succeeded on this unit. No independent
+second-opener challenge was performed; exclusion of already-open or raw-USB
+clients remains unverified. Saved configuration writes remain unauthorized.
+
 On the same date, a query-only keymap/status read reported
 `activeProfile=0`, profile name `Default`, `currentLayer_index=1`, layers
 `0..2`, default `KC_A..M` on layer `0`, and `KC_NONE` on layers `1`/`2`, with
@@ -117,7 +126,7 @@ Use the native bus classification, not a name/path heuristic.
 
 Opening filters to the exact VID/PID/page/usage tuple and an optional required transport, then requires **exactly one** candidate. Do not first discard unknown descriptors and pick one of several remaining devices.
 
-Open the enumerated exact device path. On macOS use nonexclusive opening, preserving keyboard/mouse operation. Re-read opened identity and require VID, PID, interface number, bus classification, and path to match. Do not require reopened usage to equal selected usage: macOS may expose the keyboard primary usage for a composite path.
+Open the enumerated exact device path. Ordinary macOS probes use nonexclusive opening, preserving keyboard/mouse operation; the explicit zero-report exclusive check below is the sole exception and targets only vendor interface `2`. Re-read opened identity and require VID, PID, interface number, bus classification, and path to match. Do not require reopened usage to equal selected usage: macOS may expose the keyboard primary usage for a composite path.
 
 Read at most `1024` descriptor bytes. Before sending any report, match exact descriptor bytes against these qualified profiles. Comparing actual descriptor length and SHA-256 provides the required byte-exact qualification without shipping descriptor assets:
 
@@ -737,7 +746,8 @@ Reject deserialized output asserting ready/qualified, inconsistent read-only acc
 
 `micro-probe` accepts only `--capture-ms` followed by unsigned ASCII decimal
 `0..30000` (default `2000`) and the valueless `--query`, `--read-keymap`,
-`--test-pattern`, `--rainbow-backlight`, and `--health-check` flags, plus
+`--test-pattern`, `--rainbow-backlight`, `--health-check`, and
+`--exclusive-check` flags, plus
 `--rainbow-slot <1..6>`.
 `--rainbow-slot` requires `--query`, conflicts with `--test-pattern` and
 `--health-check`, and targets only one of six protocol slot LEDs
@@ -747,6 +757,10 @@ rules above apply regardless of option order. `--rainbow-backlight` requires
 `--health-check`. It uses temporary preview-only output and does not write
 configuration. Unknown, duplicate, missing or malformed options fail before
 worker launch; there is no port/path/command selector.
+`--exclusive-check` is first-stage only: requires `--capture-ms 0`, rejects
+query/keymap/pattern/rainbow/health flags, and attempts exactly one
+`IOHIDDeviceOpen(..., 0x1)`/`IOHIDDeviceClose(..., 0)` sequence after exact
+USB vendor-interface-2 descriptor verification.
 
 Live access uses the shared private `__probe-worker` route with a framed,
 complete options object and kind `micro_hid_probe`. Its coordinator uses a
@@ -789,6 +803,11 @@ result budgeting. The shared frame encoder also returns a correlated compact
 the coordinator reports `frame_limit` rather than unexplained EOF.
 
 `--health-check` bypasses backend construction and all device I/O in the child.
+`--exclusive-check` performs no report I/O, callbacks, keymap writes, pattern
+output, or firmware/configuration changes; it reports whether exclusive open was
+requested/acquired/released and returns native open/close status codes.
+A successful seize does not prove raw-USB writer exclusion and does not grant
+firmware/keymap write permission.
 On platforms without the Windows/macOS ARM64 supervisor it returns only the pure health
 report in-process; this is not a live-I/O fallback. Native probing requires
 `micro-hid`. Windows reads optional exact BusTypeGuid metadata through a bounded

@@ -54,6 +54,9 @@ impl Options {
         }
         Duration::from_millis(match self {
             Self::Micro(options) => {
+                if options.exclusive_check {
+                    return Duration::from_secs(5);
+                }
                 u64::from(options.capture_ms)
                     + 20_000
                     + if options.read_keymap { 5_000 } else { 0 }
@@ -104,6 +107,11 @@ impl Outcome {
                 !result.command_ready
                     && !result.hardware_qualified
                     && result.read_only == (result.report.output_attempts == 0)
+                    && if options.exclusive_check {
+                        Self::valid_exclusive_micro(result)
+                    } else {
+                        result.exclusive_open.is_none()
+                    }
                     && result.report.captures.len() <= 128
                     && result.report.inputs.len() <= 128
                     && result.probe_succeeded == result.error.is_none()
@@ -135,6 +143,61 @@ impl Outcome {
             }
             _ => false,
         }
+    }
+
+    fn valid_exclusive_micro(result: &micro::MicroProbeResult) -> bool {
+        let io_zero = result.report.read_reports == 0
+            && result.report.output_reports == 0
+            && result.report.output_attempts == 0
+            && result.report.output_bytes == 0
+            && result.report.nonvendor_reports_ignored == 0
+            && result.report.captures.is_empty()
+            && result.report.inputs.is_empty();
+        if !io_zero || result.report.phase != "exclusive_open_check" {
+            return false;
+        }
+        let metadata_consistent = result.exclusive_open.as_ref().is_none_or(|open| {
+            open.requested
+                && ((open.open_code == 0)
+                    == (open.acquired && open.close_code.is_some() && open.released))
+                && (open.open_code != 0 || open.close_code == Some(0))
+                && (open.close_code.is_none() == !open.acquired)
+        });
+        if !metadata_consistent {
+            return false;
+        }
+        if result.report.opened
+            != result
+                .exclusive_open
+                .as_ref()
+                .is_some_and(|open| open.acquired)
+        {
+            return false;
+        }
+        if !result.probe_succeeded {
+            return true;
+        }
+        let Some(open) = result.exclusive_open.as_ref() else {
+            return false;
+        };
+        let Some(candidate) = result.report.candidate.as_ref() else {
+            return false;
+        };
+        use crate::devices::micro::enumeration::{
+            APPLICATION_PID, APPLICATION_VID, USAGE, USAGE_PAGE,
+        };
+        open.requested
+            && open.acquired
+            && open.released
+            && open.open_code == 0
+            && open.close_code == Some(0)
+            && result.report.descriptor_verified
+            && candidate.vendor_id == APPLICATION_VID
+            && candidate.product_id == APPLICATION_PID
+            && candidate.usage_page == USAGE_PAGE
+            && candidate.usage == USAGE
+            && candidate.interface_number == Some(2)
+            && candidate.transport == "usb"
     }
 
     fn valid_limit(
@@ -266,6 +329,7 @@ pub(super) fn parse(args: &[String], micro: bool) -> Result<Options, String> {
             }
             (Options::Micro(options), "--rainbow-backlight") => options.rainbow_backlight = true,
             (Options::Micro(options), "--health-check") => options.health_check = true,
+            (Options::Micro(options), "--exclusive-check") => options.exclusive_check = true,
             (Options::Akp03(options), "--initialize") => options.initialize = true,
             (Options::Akp03(options), "--test-pattern") => options.test_pattern = true,
             (Options::Akp03(options), "--health-check") => options.health_check = true,
@@ -325,6 +389,7 @@ fn valid_wire_shape(payload: &Value, options: &Options) -> bool {
     payload.is_object()
         && report.is_object()
         && nullable_object(&payload["response_limit"])
+        && nullable_object(&payload["exclusive_open"])
         && nullable_object(&report["candidate"])
         && report["captures"].as_array().is_some_and(|captures| {
             captures.iter().all(|capture| {
@@ -366,6 +431,7 @@ fn decode_options(payload: Value, micro: bool) -> Result<Options, worker::Diagno
             "rainbow_slot",
             "rainbow_backlight",
             "health_check",
+            "exclusive_check",
         ]
     } else {
         &["capture_ms", "initialize", "test_pattern", "health_check"]
