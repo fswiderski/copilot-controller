@@ -12,6 +12,43 @@ reports, output bytes, or input reads. This establishes discovery/open/descripto
 interoperability on this unit only, not firmware, input, LED, or command
 qualification. No vendor software or firmware was installed or run.
 
+On 2026-11-16, six explicit macOS ARM64 runs of
+`micro-probe --query --rainbow-slot <1..6> --capture-ms 0` on firmware `0.6.3`
+each completed in roughly `4080ms` with `led_clear_acknowledged=true` and
+about `42` HID reports. The operator observed no visible color changes. These
+results confirm only protocol/RPC progress accounting; they do **not** qualify
+physical LED visibility or behavior.
+
+Later that day, an explicitly authorized `micro-probe --query
+--rainbow-backlight --capture-ms 0` completed on the same unit in `4062ms`.
+The operator confirmed that all keys cycled through the colors and then went
+dark. The run sent `34` HID reports (`2176` bytes), received `13`, and
+acknowledged the final all-off preview without cleanup errors. This is a
+single-unit observation of temporary whole-keypad lighting only, not
+individual-key control, other firmware/platforms, or broad hardware
+qualification. No saved keymap, configuration file, or firmware was changed.
+
+On the same date, a query-only keymap/status read reported
+`activeProfile=0`, profile name `Default`, `currentLayer_index=1`, layers
+`0..2`, default `KC_A..M` on layer `0`, and `KC_NONE` on layers `1`/`2`, with
+no AG/ACT app bindings observed. This is recorded as returned data only, not a
+causal explanation for the non-visible rainbow result. The `currentLayer_index`
+value is treated as an external observation only here, not a locally proven
+general indexing rule.
+
+External protocol notes were read from:
+
+- <https://raw.githubusercontent.com/00cyre/creator-micro-kit/master/README.md>
+- <https://raw.githubusercontent.com/okko/micro2-agent-keys/master/docs/protocol.md>
+
+Those references describe separate host projects and mixed firmware observations
+(including `0.6.2`/`0.6.0-rc`), not this implementation's own verified runtime.
+They inform diagnostic hypotheses only; they do not widen ordinary RPC
+admission, qualification, or supported methods in this contract.
+In particular, any AG-dependent key-to-light mapping behavior is treated as
+external observation unless reproduced under this repository's own test and
+hardware evidence policy.
+
 ## 1. Capability and safety boundaries
 
 - Ordinary vendor RPC permits four methods only; bootloader entry is unavailable through it.
@@ -186,6 +223,11 @@ Allow only exact case-sensitive methods:
 - `v.oai.thstatus`
 
 For `fs.read`, parameters must equal exactly `{"file":"keymap.json"}`, with no extra fields. Reject file writes/deletes, other reads, self-test, layer writes, and bootloader entry.
+
+`lights.preview` is intentionally excluded from ordinary `begin(method, params)`
+admission. If used by diagnostics, it must go through a private typed builder
+that emits only the exact preview schema documented in §9.4, not arbitrary
+method/parameter pass-through.
 
 Fresh request IDs start at `101` and increment once per admitted call. Rejected methods/parameters do not consume IDs. The unsigned 64-bit counter has no specified wraparound strategy.
 
@@ -418,7 +460,7 @@ Attach supplied connection generation and presentation clock sample unchanged. M
 
 ### 7.1 Legacy status frames
 
-Always repaint six entries, IDs `0..5` in order. Runtime slots are one-based; LED IDs zero-based. Entry fields serialize in order:
+Always repaint six entries, IDs `0..5` in order. Runtime slots are one-based; LED IDs zero-based. These six protocol slot LEDs are the only addressed LEDs in `v.oai.thstatus`; this is not a claim about total physical button count or access to any LED IDs beyond `0..5`. Entry fields serialize in order:
 
 | Field | Meaning |
 |---|---|
@@ -635,10 +677,15 @@ After qualification, create fresh RPC/input state:
 
 1. If query: phase `firmware`, request version/null; preserve observed string; apply ordinary gate; set compatibility. Then phase `status`, request status/null.
 2. If keymap: phase `keymap`, read exact keymap file.
-3. If pattern: phase `led_test`, set attempted **before** requesting frame.
-4. Phase `capture`, acquire for requested duration subject to budgets.
-5. If LED test attempted and no write failed: phase `clear_leds`, request shutdown.
-6. Finalize `elapsed_ms` and phase `complete`/`failed`.
+3. If test pattern: phase `led_test`, set attempted **before** requesting frame.
+4. If `rainbow_slot` is set: phase `led_test`, set attempted **before** the first frame; send exactly seven `v.oai.thstatus` frames for that one selected slot LED (protocol IDs `0..5`, request uses one-based slot `1..6` mapped to ID `0..5`) in order red/orange/yellow/green/blue/indigo/violet. Keep effect/speed at legacy `e=1,s=0.2`, brightness `0.25`, and set all other five entries black. After each successful frame RPC, dwell `500ms` via injected probe clock/sleep before continuing.
+5. If `rainbow_backlight` is set: phase `led_test`, set attempted **before** the first frame; send exactly seven `lights.preview` frames in order red/orange/yellow/green/blue/indigo/violet with params exactly:
+   - `backlight={effect:"solid",brightness:0.25,speed:0.2,magic:0.0,color:<packed24>}`
+   - `underglow={effect:"off",brightness:0.0,speed:0.0,magic:0.0,color:0}`
+   Dwell `500ms` after each successful frame using injected clock/sleep.
+6. Phase `capture`, acquire for requested duration subject to budgets.
+7. If LED test attempted and no write failed: phase `clear_leds`; clear with shutdown `v.oai.thstatus` after slot/test-pattern runs, or with `lights.preview` both zones off (`effect:"off",brightness:0.0,speed:0.0,magic:0.0,color:0`) after `rainbow_backlight`.
+8. Finalize `elapsed_ms` and phase `complete`/`failed`.
 
 Before every RPC other than ID101, drain incoming traffic for a fixed `50ms` interval, queue/record inputs using the same decoder, then write. This is not a wait-until-quiet policy. It applies to cleanup. Response reads use slices of at most `50ms` within the four-second deadline.
 
@@ -682,6 +729,7 @@ Launch same executable's internal diagnostic worker through shared bounded-stdio
 - Health check: `3s`.
 - Normal: `capture_ms +20000ms`.
 - Keymap: another `5000ms`.
+- Rainbow slot cycle: add finite `36000ms` (`3500ms` dwell + bounded RPC/cleanup allowance).
 
 Reject deserialized output asserting ready/qualified, inconsistent read-only accounting, or more than `128` captures/inputs. Shared supervisor internals are a separate contract.
 
@@ -689,9 +737,16 @@ Reject deserialized output asserting ready/qualified, inconsistent read-only acc
 
 `micro-probe` accepts only `--capture-ms` followed by unsigned ASCII decimal
 `0..30000` (default `2000`) and the valueless `--query`, `--read-keymap`,
-`--test-pattern`, and `--health-check` flags. Dependency/conflict rules above
-apply regardless of option order. Unknown, duplicate, missing or malformed
-options fail before worker launch; there is no port/path/command selector.
+`--test-pattern`, `--rainbow-backlight`, and `--health-check` flags, plus
+`--rainbow-slot <1..6>`.
+`--rainbow-slot` requires `--query`, conflicts with `--test-pattern` and
+`--health-check`, and targets only one of six protocol slot LEDs
+(`v.oai.thstatus` IDs `0..5`), not all physical buttons. Dependency/conflict
+rules above apply regardless of option order. `--rainbow-backlight` requires
+`--query` and conflicts with `--rainbow-slot`, `--test-pattern`, and
+`--health-check`. It uses temporary preview-only output and does not write
+configuration. Unknown, duplicate, missing or malformed options fail before
+worker launch; there is no port/path/command selector.
 
 Live access uses the shared private `__probe-worker` route with a framed,
 complete options object and kind `micro_hid_probe`. Its coordinator uses a

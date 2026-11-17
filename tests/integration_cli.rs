@@ -248,6 +248,30 @@ fn hid_cli_validation_and_hidden_routes_never_emit_success_output() {
         vec!["micro-probe", "--query", "--query"],
         vec!["micro-probe", "--read-keymap"],
         vec!["micro-probe", "--test-pattern"],
+        vec!["micro-probe", "--rainbow-slot", "1"],
+        vec!["micro-probe", "--query", "--rainbow-slot", "0"],
+        vec!["micro-probe", "--query", "--rainbow-slot", "7"],
+        vec!["micro-probe", "--rainbow-backlight"],
+        vec![
+            "micro-probe",
+            "--query",
+            "--rainbow-backlight",
+            "--test-pattern",
+        ],
+        vec![
+            "micro-probe",
+            "--query",
+            "--rainbow-backlight",
+            "--rainbow-slot",
+            "1",
+        ],
+        vec![
+            "micro-probe",
+            "--query",
+            "--rainbow-slot",
+            "1",
+            "--test-pattern",
+        ],
         vec!["micro-probe", "--query", "--health-check"],
         vec!["micro-probe", "--query", "--command", "anything"],
         vec!["micro-probe", "--initialize"],
@@ -273,6 +297,8 @@ fn hid_cli_validation_and_hidden_routes_never_emit_success_output() {
     assert!(help.status.success());
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(text.contains("micro-probe"));
+    assert!(text.contains("--rainbow-slot <1..6>"));
+    assert!(text.contains("--rainbow-backlight"));
     assert!(text.contains("akp03-probe"));
     assert!(!text.contains("__probe-worker"));
     assert!(!text.contains("__akp03-worker"));
@@ -280,6 +306,8 @@ fn hid_cli_validation_and_hidden_routes_never_emit_success_output() {
     for args in [
         vec!["micro-probe", "--capture-ms", "0"],
         vec!["micro-probe", "--query", "--read-keymap", "--test-pattern"],
+        vec!["micro-probe", "--query", "--rainbow-slot", "3"],
+        vec!["micro-probe", "--query", "--rainbow-backlight"],
         vec!["akp03-probe", "--capture-ms", "0"],
         vec!["akp03-probe", "--initialize", "--test-pattern"],
     ] {
