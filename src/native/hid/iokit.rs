@@ -22,6 +22,7 @@ const UTF8: u32 = 0x0800_0100;
 const SINT32: CFIndex = 3;
 const MAX_QUEUED: usize = 64;
 const MAX_SCAN: CFIndex = 4096;
+const MAX_INTERFACE_ANCESTRY_NODES: usize = 16;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -83,6 +84,15 @@ unsafe extern "C" {
     fn IOHIDDeviceScheduleWithRunLoop(d: CFTypeRef, rl: CFTypeRef, mode: CFTypeRef);
     fn IOHIDDeviceUnscheduleFromRunLoop(d: CFTypeRef, rl: CFTypeRef, mode: CFTypeRef);
     fn IORegistryEntryGetRegistryEntryID(service: u32, id: *mut u64) -> i32;
+    fn IORegistryEntryCreateCFProperty(
+        entry: u32,
+        key: CFTypeRef,
+        allocator: CFTypeRef,
+        options: u32,
+    ) -> CFTypeRef;
+    fn IORegistryEntryGetParentEntry(entry: u32, plane: *const c_char, parent: *mut u32) -> i32;
+    fn IOObjectConformsTo(object: u32, class_name: *const c_char) -> i32;
+    fn IOObjectRelease(object: u32) -> i32;
 }
 
 /// Owned CoreFoundation object released on drop.
@@ -90,7 +100,7 @@ struct Cf(CFTypeRef);
 
 impl Cf {
     fn new(p: CFTypeRef) -> Option<Self> {
-        (!p.is_null()).then_some(Self(p))
+        (!p.is_null()).then(|| Self(p))
     }
 }
 
@@ -151,6 +161,141 @@ fn entry_id(dev: CFTypeRef) -> Option<u64> {
     }
     let mut id = 0u64;
     (unsafe { IORegistryEntryGetRegistryEntryID(svc, &mut id) } == 0).then_some(id)
+}
+
+struct IoOwned(u32);
+
+impl IoOwned {
+    fn new(value: u32) -> Option<Self> {
+        (value != 0).then(|| Self(value))
+    }
+}
+
+impl Drop for IoOwned {
+    fn drop(&mut self) {
+        let _ = unsafe { IOObjectRelease(self.0) };
+    }
+}
+
+fn entry_property_i32(entry: u32, key: &str) -> Option<i32> {
+    let key = cfstr(key)?;
+    let value =
+        Cf::new(unsafe { IORegistryEntryCreateCFProperty(entry, key.0, kCFAllocatorDefault, 0) })?;
+    if unsafe { CFGetTypeID(value.0) != CFNumberGetTypeID() } {
+        return None;
+    }
+    let mut out = 0i32;
+    (unsafe { CFNumberGetValue(value.0, SINT32, (&raw mut out).cast()) } != 0).then_some(out)
+}
+
+fn parent_entry(entry: u32) -> Option<IoOwned> {
+    let plane = c"IOService";
+    let mut parent = 0u32;
+    (unsafe { IORegistryEntryGetParentEntry(entry, plane.as_ptr(), &mut parent) == 0 })
+        .then(|| IoOwned::new(parent))
+        .flatten()
+}
+
+fn conforms_to(entry: u32, class_name: &std::ffi::CStr) -> bool {
+    unsafe { IOObjectConformsTo(entry, class_name.as_ptr()) != 0 }
+}
+
+trait HeldNode {
+    fn raw(&self) -> u32;
+}
+
+impl HeldNode for IoOwned {
+    fn raw(&self) -> u32 {
+        self.0
+    }
+}
+
+struct AncestorEvidence<P> {
+    registry_id: Option<u64>,
+    is_usb_interface: bool,
+    is_usb_device: bool,
+    interface_number: Option<i32>,
+    vendor_id: Option<i32>,
+    product_id: Option<i32>,
+    parent: Option<P>,
+}
+
+fn interface_number_from_ancestry<P: HeldNode>(
+    service: u32,
+    identity: HidIdentity,
+    mut read_node: impl FnMut(u32) -> Option<AncestorEvidence<P>>,
+) -> Option<i32> {
+    let mut current_raw = Some(service);
+    let mut current_parent: Option<P> = None;
+    let mut seen = Vec::with_capacity(MAX_INTERFACE_ANCESTRY_NODES);
+    for _ in 0..MAX_INTERFACE_ANCESTRY_NODES {
+        let node = if let Some(parent) = current_parent.as_ref() {
+            parent.raw()
+        } else {
+            current_raw?
+        };
+        let evidence = read_node(node)?;
+        let id = evidence.registry_id?;
+        if seen.contains(&id) {
+            return None;
+        }
+        seen.push(id);
+        if evidence.is_usb_interface {
+            let interface_number = evidence.interface_number?;
+            if !(0..=255).contains(&interface_number) {
+                return None;
+            }
+            if evidence.vendor_id == Some(i32::from(identity.vendor_id))
+                && evidence.product_id == Some(i32::from(identity.product_id))
+            {
+                return Some(interface_number);
+            }
+            return None;
+        }
+        if evidence.is_usb_device {
+            return None;
+        }
+        current_raw = None;
+        current_parent = evidence.parent;
+    }
+    None
+}
+
+fn resolve_interface_number<P: HeldNode>(
+    direct: Option<i32>,
+    service: u32,
+    identity: HidIdentity,
+    read_node: impl FnMut(u32) -> Option<AncestorEvidence<P>>,
+) -> Option<i32> {
+    if let Some(number) = direct {
+        return Some(number);
+    }
+    interface_number_from_ancestry(service, identity, read_node)
+}
+
+fn interface_number(dev: CFTypeRef, identity: HidIdentity) -> Option<i32> {
+    let direct = prop_i32(dev, "InterfaceNumber");
+    let service = unsafe { IOHIDDeviceGetService(dev) };
+    if service == 0 {
+        return direct;
+    }
+    let interface_class = c"IOUSBHostInterface";
+    let device_class = c"IOUSBHostDevice";
+    resolve_interface_number(direct, service, identity, |entry| {
+        Some(AncestorEvidence {
+            registry_id: {
+                let mut id = 0u64;
+                (unsafe { IORegistryEntryGetRegistryEntryID(entry, &mut id) } == 0).then_some(id)
+            },
+            is_usb_interface: conforms_to(entry, interface_class),
+            is_usb_device: conforms_to(entry, device_class),
+            interface_number: entry_property_i32(entry, "bInterfaceNumber")
+                .or_else(|| entry_property_i32(entry, "InterfaceNumber")),
+            vendor_id: entry_property_i32(entry, "idVendor"),
+            product_id: entry_property_i32(entry, "idProduct"),
+            parent: parent_entry(entry),
+        })
+    })
 }
 
 /// Manager restricted to one vendor/product, plus the (owned) matching devices.
@@ -251,7 +396,7 @@ fn describe(dev: CFTypeRef, identity: HidIdentity) -> Option<HidDescriptor> {
         serial: prop_string(dev, "SerialNumber"),
         max_input_report_len: size("MaxInputReportSize"),
         max_output_report_len: size("MaxOutputReportSize"),
-        interface_number: prop_i32(dev, "InterfaceNumber"),
+        interface_number: interface_number(dev, identity),
         bus: prop_string(dev, "Transport").map(|transport| {
             if transport.eq_ignore_ascii_case("usb") {
                 HidBus::Usb
@@ -570,6 +715,7 @@ pub(crate) fn fixture_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
     #[test]
     fn stopped_or_finished_run_loop_fails_without_spinning_or_hardware() {
@@ -588,5 +734,366 @@ mod tests {
             Err(HidError::Timeout),
         );
         assert_eq!(run_loop_slice(Duration::from_millis(50), |_| 4), Ok(()));
+    }
+
+    #[test]
+    fn null_wrappers_do_not_construct_releasing_drops() {
+        assert!(Cf::new(null()).is_none());
+        assert!(IoOwned::new(0).is_none());
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestNode {
+        registry_id: Option<u64>,
+        is_usb_interface: bool,
+        is_usb_device: bool,
+        interface_number: Option<i32>,
+        vendor_id: Option<i32>,
+        product_id: Option<i32>,
+        parent: Option<u32>,
+    }
+
+    fn test_node(
+        registry_id: Option<u64>,
+        is_usb_interface: bool,
+        is_usb_device: bool,
+        interface_number: Option<i32>,
+        vendor_id: Option<i32>,
+        product_id: Option<i32>,
+        parent: Option<u32>,
+    ) -> TestNode {
+        TestNode {
+            registry_id,
+            is_usb_interface,
+            is_usb_device,
+            interface_number,
+            vendor_id,
+            product_id,
+            parent,
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestParent(u32);
+
+    impl HeldNode for TestParent {
+        fn raw(&self) -> u32 {
+            self.0
+        }
+    }
+
+    fn find_interface(
+        start: u32,
+        identity: HidIdentity,
+        nodes: &HashMap<u32, TestNode>,
+    ) -> Option<i32> {
+        interface_number_from_ancestry(start, identity, |entry| {
+            nodes.get(&entry).map(|n| AncestorEvidence {
+                registry_id: n.registry_id,
+                is_usb_interface: n.is_usb_interface,
+                is_usb_device: n.is_usb_device,
+                interface_number: n.interface_number,
+                vendor_id: n.vendor_id,
+                product_id: n.product_id,
+                parent: n.parent.map(TestParent),
+            })
+        })
+    }
+
+    #[test]
+    fn ancestor_usb_interface_number_is_used_when_identity_matches() {
+        let identity = HidIdentity {
+            vendor_id: 0x303a,
+            product_id: 0x8298,
+        };
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            1,
+            test_node(Some(11), false, false, None, None, None, Some(2)),
+        );
+        nodes.insert(
+            2,
+            test_node(Some(12), false, false, None, None, None, Some(3)),
+        );
+        nodes.insert(
+            3,
+            test_node(
+                Some(13),
+                true,
+                false,
+                Some(2),
+                Some(i32::from(identity.vendor_id)),
+                Some(i32::from(identity.product_id)),
+                Some(4),
+            ),
+        );
+        assert_eq!(find_interface(1, identity, &nodes), Some(2));
+    }
+
+    #[test]
+    fn usb_interface_bounds_are_enforced() {
+        let identity = HidIdentity {
+            vendor_id: 0x303a,
+            product_id: 0x8298,
+        };
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            1,
+            test_node(
+                Some(1),
+                true,
+                false,
+                Some(2),
+                Some(i32::from(identity.vendor_id)),
+                Some(i32::from(identity.product_id)),
+                None,
+            ),
+        );
+        assert_eq!(find_interface(1, identity, &nodes), Some(2));
+        nodes.insert(
+            1,
+            test_node(
+                Some(1),
+                true,
+                false,
+                Some(256),
+                Some(i32::from(identity.vendor_id)),
+                Some(i32::from(identity.product_id)),
+                None,
+            ),
+        );
+        assert_eq!(find_interface(1, identity, &nodes), None);
+    }
+
+    #[test]
+    fn ancestor_usb_interface_mismatch_or_missing_identity_is_rejected() {
+        let identity = HidIdentity {
+            vendor_id: 0x303a,
+            product_id: 0x8298,
+        };
+        let mut mismatched = HashMap::new();
+        mismatched.insert(
+            1,
+            test_node(
+                Some(1),
+                true,
+                false,
+                Some(2),
+                Some(i32::from(identity.vendor_id)),
+                Some(0x1234),
+                None,
+            ),
+        );
+        assert_eq!(find_interface(1, identity, &mismatched), None);
+
+        let mut missing = HashMap::new();
+        missing.insert(
+            1,
+            test_node(
+                Some(1),
+                true,
+                false,
+                Some(2),
+                Some(i32::from(identity.vendor_id)),
+                None,
+                None,
+            ),
+        );
+        assert_eq!(find_interface(1, identity, &missing), None);
+    }
+
+    #[test]
+    fn malformed_or_unrelated_ancestry_is_unavailable() {
+        let identity = HidIdentity {
+            vendor_id: 0x303a,
+            product_id: 0x8298,
+        };
+        let mut cycle = HashMap::new();
+        cycle.insert(
+            1,
+            test_node(Some(7), false, false, None, None, None, Some(2)),
+        );
+        cycle.insert(
+            2,
+            test_node(Some(7), false, false, None, None, None, Some(1)),
+        );
+        assert_eq!(find_interface(1, identity, &cycle), None);
+
+        let mut unrelated = HashMap::new();
+        unrelated.insert(
+            1,
+            test_node(
+                Some(10),
+                false,
+                false,
+                Some(9),
+                Some(i32::from(identity.vendor_id)),
+                Some(i32::from(identity.product_id)),
+                None,
+            ),
+        );
+        assert_eq!(find_interface(1, identity, &unrelated), None);
+
+        let mut too_deep = HashMap::new();
+        for id in 1..=17 {
+            let parent = (id < 17).then_some(id + 1);
+            too_deep.insert(
+                id,
+                test_node(Some(id as u64), false, false, None, None, None, parent),
+            );
+        }
+        too_deep.insert(
+            17,
+            test_node(
+                Some(17),
+                true,
+                false,
+                Some(2),
+                Some(i32::from(identity.vendor_id)),
+                Some(i32::from(identity.product_id)),
+                None,
+            ),
+        );
+        assert_eq!(find_interface(1, identity, &too_deep), None);
+
+        let mut missing_registry_id = HashMap::new();
+        missing_registry_id.insert(1, test_node(None, false, false, None, None, None, Some(2)));
+        missing_registry_id.insert(
+            2,
+            test_node(
+                Some(2),
+                true,
+                false,
+                Some(2),
+                Some(i32::from(identity.vendor_id)),
+                Some(i32::from(identity.product_id)),
+                None,
+            ),
+        );
+        assert_eq!(find_interface(1, identity, &missing_registry_id), None);
+    }
+
+    #[test]
+    fn traversal_stops_at_usb_device_boundary() {
+        let identity = HidIdentity {
+            vendor_id: 0x303a,
+            product_id: 0x8298,
+        };
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            1,
+            test_node(Some(1), false, false, None, None, None, Some(2)),
+        );
+        nodes.insert(
+            2,
+            test_node(
+                Some(2),
+                false,
+                true,
+                None,
+                Some(i32::from(identity.vendor_id)),
+                Some(0x1234),
+                Some(3),
+            ),
+        );
+        nodes.insert(
+            3,
+            test_node(
+                Some(3),
+                true,
+                false,
+                Some(2),
+                Some(i32::from(identity.vendor_id)),
+                Some(i32::from(identity.product_id)),
+                None,
+            ),
+        );
+        assert_eq!(find_interface(1, identity, &nodes), None);
+    }
+
+    #[derive(Clone)]
+    struct DroppableParent {
+        raw: u32,
+        released: Rc<RefCell<Vec<u32>>>,
+    }
+
+    impl HeldNode for DroppableParent {
+        fn raw(&self) -> u32 {
+            self.raw
+        }
+    }
+
+    impl Drop for DroppableParent {
+        fn drop(&mut self) {
+            self.released.borrow_mut().push(self.raw);
+        }
+    }
+
+    #[test]
+    fn parent_handle_lives_through_node_visit() {
+        let identity = HidIdentity {
+            vendor_id: 0x303a,
+            product_id: 0x8298,
+        };
+        let released = Rc::new(RefCell::new(Vec::<u32>::new()));
+        let nodes = HashMap::from([
+            (
+                1u32,
+                test_node(Some(1), false, false, None, None, None, Some(2)),
+            ),
+            (
+                2u32,
+                test_node(Some(2), false, false, None, None, None, Some(3)),
+            ),
+            (
+                3u32,
+                test_node(
+                    Some(3),
+                    true,
+                    false,
+                    Some(2),
+                    Some(i32::from(identity.vendor_id)),
+                    Some(i32::from(identity.product_id)),
+                    None,
+                ),
+            ),
+        ]);
+        let interface = interface_number_from_ancestry(1, identity, |entry| {
+            assert!(
+                !released.borrow().contains(&entry),
+                "current node handle was released before visit"
+            );
+            nodes.get(&entry).map(|n| AncestorEvidence {
+                registry_id: n.registry_id,
+                is_usb_interface: n.is_usb_interface,
+                is_usb_device: n.is_usb_device,
+                interface_number: n.interface_number,
+                vendor_id: n.vendor_id,
+                product_id: n.product_id,
+                parent: n.parent.map(|raw| DroppableParent {
+                    raw,
+                    released: Rc::clone(&released),
+                }),
+            })
+        });
+        assert_eq!(interface, Some(2));
+        let released = released.borrow();
+        assert!(released.contains(&2));
+        assert!(released.contains(&3));
+    }
+
+    #[test]
+    fn direct_property_is_preferred_and_preserves_bluetooth_minus_one() {
+        let identity = HidIdentity {
+            vendor_id: 0x303a,
+            product_id: 0x8298,
+        };
+        let mut called = false;
+        let direct = resolve_interface_number::<TestParent>(Some(-1), 1, identity, |_| {
+            called = true;
+            None
+        });
+        assert_eq!(direct, Some(-1));
+        assert!(!called);
     }
 }

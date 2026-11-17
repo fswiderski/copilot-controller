@@ -4,6 +4,14 @@ This appendix specifies independent functional parity for the Micro device famil
 
 The deterministic scenarios below use synthetic transports and injected clocks. They do **not** establish physical qualification. No descriptor assets, implementation code, or firmware binaries are distributed by this specification.
 
+On 2026-11-16, an explicitly invoked macOS ARM64 `micro-probe --capture-ms 0`
+completed on one USB Creator Micro 2 (`303A:8298`). Native ancestry supplied
+interface `2`; the existing exact 36-byte vendor descriptor profile verified.
+The device opened and the probe completed with zero output attempts, output
+reports, output bytes, or input reads. This establishes discovery/open/descriptor
+interoperability on this unit only, not firmware, input, LED, or command
+qualification. No vendor software or firmware was installed or run.
+
 ## 1. Capability and safety boundaries
 
 - Ordinary vendor RPC permits four methods only; bootloader entry is unavailable through it.

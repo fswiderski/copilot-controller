@@ -963,6 +963,17 @@ Numbered output retains its report ID; unnumbered output strips the synthetic
 zero. Synchronous `IOHIDDeviceSetReport` has no individual write deadline:
 only the supervised child's lifetime is bounded. Reopened identity is reread
 from native properties; unavailable or mismatching evidence fails closed.
+macOS interface number resolution reads direct `InterfaceNumber` first, then
+examines at most 16 IOService nodes starting at the same service node and
+following only its parents.
+Only an ancestor conforming to `IOUSBHostInterface` may supply
+`bInterfaceNumber`/`InterfaceNumber`, and only when that same ancestor also
+exposes exact matching `idVendor`/`idProduct` with interface number in
+`0..=255`. Missing registry-entry IDs, cycles, depth exhaustion, malformed/
+missing interface evidence return unavailable; non-interface nodes cannot
+supply an interface number. Traversal
+never crosses an `IOUSBHostDevice` boundary to continue searching. No sibling
+scan, parent-device borrowing, or fabricated fallback is permitted.
 Stopped/finished IOKit run loops return a static protocol error; timed-out
 run-loop slices return read timeout instead of spinning.
 

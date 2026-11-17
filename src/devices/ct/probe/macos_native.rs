@@ -65,7 +65,7 @@ unsafe extern "C" {
     ) -> KernReturn;
     fn IOIteratorNext(iterator: IoIterator) -> IoObject;
     fn IOObjectRelease(object: IoObject) -> KernReturn;
-    fn IOObjectConformsTo(object: IoObject, class_name: *const c_char) -> bool;
+    fn IOObjectConformsTo(object: IoObject, class_name: *const c_char) -> i32;
     fn IORegistryEntryGetRegistryEntryID(entry: IoObject, id: *mut u64) -> KernReturn;
     fn IORegistryEntryCreateCFProperty(
         entry: IoObject,
@@ -84,7 +84,7 @@ struct Cf(CFTypeRef);
 
 impl Cf {
     fn new(value: CFTypeRef) -> Option<Self> {
-        (!value.is_null()).then_some(Self(value))
+        (!value.is_null()).then(|| Self(value))
     }
 }
 
@@ -98,7 +98,7 @@ struct IoOwned(IoObject);
 
 impl IoOwned {
     fn new(value: IoObject) -> Option<Self> {
-        (value != 0).then_some(Self(value))
+        (value != 0).then(|| Self(value))
     }
 }
 
@@ -197,7 +197,7 @@ fn property_string(entry: IoObject, key: &str) -> Option<String> {
 }
 
 fn object_conforms(entry: IoObject, class_name: &CStr) -> bool {
-    unsafe { IOObjectConformsTo(entry, class_name.as_ptr()) }
+    unsafe { IOObjectConformsTo(entry, class_name.as_ptr()) != 0 }
 }
 
 fn usb_device_parent_id(entry: IoObject) -> Option<u64> {
@@ -1201,6 +1201,12 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn null_wrappers_do_not_construct_releasing_drops() {
+        assert!(Cf::new(std::ptr::null()).is_none());
+        assert!(IoOwned::new(0).is_none());
+    }
 
     struct Fixture(PathBuf);
 
