@@ -26,6 +26,7 @@ const INPUT_BUDGET: usize = 128;
 const READ_SLICE: Duration = Duration::from_millis(50);
 const DRAIN_INTERVAL: Duration = Duration::from_millis(50);
 const RAINBOW_DWELL: Duration = Duration::from_millis(500);
+const BACKLIGHT_TEST_DWELL: Duration = Duration::from_millis(750);
 const RAINBOW_COLORS: [u32; 7] = [
     0xff0000, // red
     0xff7f00, // orange
@@ -35,6 +36,40 @@ const RAINBOW_COLORS: [u32; 7] = [
     0x4b0082, // indigo
     0x9400d3, // violet
 ];
+const CHANNEL_LEVELS: [u8; 6] = [0, 32, 64, 128, 192, 255];
+const BRIGHTNESS_LEVELS: [f64; 7] = [0.0, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BacklightTestMode {
+    Rgb,
+    Red,
+    Green,
+    Blue,
+    Gray,
+    Brightness,
+}
+
+impl BacklightTestMode {
+    pub(crate) fn parse_cli(value: &str) -> Option<Self> {
+        match value {
+            "rgb" => Some(Self::Rgb),
+            "red" => Some(Self::Red),
+            "green" => Some(Self::Green),
+            "blue" => Some(Self::Blue),
+            "gray" => Some(Self::Gray),
+            "brightness" => Some(Self::Brightness),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn step_count(self) -> u64 {
+        match self {
+            Self::Rgb | Self::Brightness => 7,
+            Self::Red | Self::Green | Self::Blue | Self::Gray => 6,
+        }
+    }
+}
 
 fn required_nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
@@ -57,6 +92,8 @@ pub struct MicroProbeOptions {
     pub rainbow_slot: Option<u8>,
     #[serde(default)]
     pub rainbow_backlight: bool,
+    #[serde(default)]
+    pub backlight_test: Option<BacklightTestMode>,
     #[serde(default)]
     pub health_check: bool,
     #[serde(default)]
@@ -83,8 +120,14 @@ impl MicroProbeOptions {
         if self.test_pattern && self.rainbow_backlight {
             return Err("test_pattern conflicts with rainbow_backlight");
         }
+        if self.test_pattern && self.backlight_test.is_some() {
+            return Err("test_pattern conflicts with backlight_test");
+        }
         if self.rainbow_slot.is_some() && self.rainbow_backlight {
             return Err("rainbow_slot conflicts with rainbow_backlight");
+        }
+        if self.rainbow_slot.is_some() && self.backlight_test.is_some() {
+            return Err("rainbow_slot conflicts with backlight_test");
         }
         if let Some(slot) = self.rainbow_slot
             && !(1..=6).contains(&slot)
@@ -94,16 +137,23 @@ impl MicroProbeOptions {
         if self.rainbow_backlight && !self.query {
             return Err("rainbow_backlight requires query");
         }
+        if self.backlight_test.is_some() && !self.query {
+            return Err("backlight_test requires query");
+        }
+        if self.rainbow_backlight && self.backlight_test.is_some() {
+            return Err("rainbow_backlight conflicts with backlight_test");
+        }
         if self.health_check
             && (self.query
                 || self.read_keymap
                 || self.test_pattern
                 || self.rainbow_slot.is_some()
                 || self.rainbow_backlight
+                || self.backlight_test.is_some()
                 || self.exclusive_check)
         {
             return Err(
-                "health_check conflicts with query, read_keymap, test_pattern, rainbow_slot, rainbow_backlight, and exclusive_check",
+                "health_check conflicts with query, read_keymap, test_pattern, rainbow_slot, rainbow_backlight, backlight_test, and exclusive_check",
             );
         }
         if self.exclusive_check
@@ -113,10 +163,11 @@ impl MicroProbeOptions {
                 || self.test_pattern
                 || self.rainbow_slot.is_some()
                 || self.rainbow_backlight
+                || self.backlight_test.is_some()
                 || self.health_check)
         {
             return Err(
-                "exclusive_check requires capture_ms=0 and conflicts with query, read_keymap, test_pattern, rainbow_slot, rainbow_backlight, and health_check",
+                "exclusive_check requires capture_ms=0 and conflicts with query, read_keymap, test_pattern, rainbow_slot, rainbow_backlight, backlight_test, and health_check",
             );
         }
         Ok(())
@@ -513,6 +564,15 @@ fn run_micro_qualified(
                     succeeded = false;
                 }
             }
+            if succeeded && let Some(mode) = options.backlight_test {
+                session.report.phase = "led_test".to_owned();
+                session.report.led_test_attempted = true;
+                cleanup_mode = Some(CleanupMode::LightsPreview);
+                if let Err(error) = run_backlight_test_cycle(&mut session, mode) {
+                    result.error = Some(error);
+                    succeeded = false;
+                }
+            }
         }
 
         if succeeded {
@@ -562,23 +622,40 @@ fn run_micro_qualified(
 }
 
 fn run_rainbow_cycle(session: &mut ProbeSession<'_>, slot_id: u8) -> Result<(), String> {
-    for color in RAINBOW_COLORS {
-        session.call(
-            "v.oai.thstatus",
-            Value::Null,
-            Some(&rainbow_slot_frame(slot_id, color)),
-            false,
-        )?;
-        session.sleep(RAINBOW_DWELL);
+    run_sequence(
+        session,
+        RAINBOW_COLORS.len(),
+        RAINBOW_DWELL,
+        |session, index| {
+            session.call(
+                "v.oai.thstatus",
+                Value::Null,
+                Some(&rainbow_slot_frame(slot_id, RAINBOW_COLORS[index])),
+                false,
+            )?;
+            Ok(())
+        },
+    )
+}
+
+fn run_sequence(
+    session: &mut ProbeSession<'_>,
+    steps: usize,
+    dwell: Duration,
+    mut call: impl FnMut(&mut ProbeSession<'_>, usize) -> Result<(), String>,
+) -> Result<(), String> {
+    for index in 0..steps {
+        call(session, index)?;
+        session.sleep(dwell);
     }
     Ok(())
 }
 
-fn preview_color_frame(color: u32) -> PreviewLighting {
+fn preview_frame(color: u32, brightness: f64) -> PreviewLighting {
     PreviewLighting {
         backlight: PreviewZone {
             effect: PreviewEffect::Solid,
-            brightness: 0.25,
+            brightness,
             speed: 0.2,
             magic: 0.0,
             color,
@@ -591,6 +668,10 @@ fn preview_color_frame(color: u32) -> PreviewLighting {
             color: 0,
         },
     }
+}
+
+fn preview_color_frame(color: u32) -> PreviewLighting {
+    preview_frame(color, 0.25)
 }
 
 fn preview_off_frame() -> PreviewLighting {
@@ -613,11 +694,61 @@ fn preview_off_frame() -> PreviewLighting {
 }
 
 fn run_backlight_rainbow_cycle(session: &mut ProbeSession<'_>) -> Result<(), String> {
-    for color in RAINBOW_COLORS {
-        session.call_lights_preview(&preview_color_frame(color), false)?;
-        session.sleep(RAINBOW_DWELL);
+    run_sequence(
+        session,
+        RAINBOW_COLORS.len(),
+        RAINBOW_DWELL,
+        |session, index| {
+            session.call_lights_preview(&preview_color_frame(RAINBOW_COLORS[index]), false)?;
+            Ok(())
+        },
+    )
+}
+
+fn channel_frame(mode: BacklightTestMode, level: u8) -> PreviewLighting {
+    let color = match mode {
+        BacklightTestMode::Red => u32::from(level) << 16,
+        BacklightTestMode::Green => u32::from(level) << 8,
+        BacklightTestMode::Blue => u32::from(level),
+        BacklightTestMode::Gray => {
+            let level = u32::from(level);
+            (level << 16) | (level << 8) | level
+        }
+        BacklightTestMode::Rgb | BacklightTestMode::Brightness => {
+            unreachable!("invalid channel mode")
+        }
+    };
+    preview_color_frame(color)
+}
+
+fn backlight_test_frame(mode: BacklightTestMode, index: usize) -> PreviewLighting {
+    match mode {
+        BacklightTestMode::Rgb => preview_color_frame(
+            [
+                0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0xff00ff, 0x00ffff, 0xffffff,
+            ][index],
+        ),
+        BacklightTestMode::Red
+        | BacklightTestMode::Green
+        | BacklightTestMode::Blue
+        | BacklightTestMode::Gray => channel_frame(mode, CHANNEL_LEVELS[index]),
+        BacklightTestMode::Brightness => preview_frame(0x00ff_ffff, BRIGHTNESS_LEVELS[index]),
     }
-    Ok(())
+}
+
+fn run_backlight_test_cycle(
+    session: &mut ProbeSession<'_>,
+    mode: BacklightTestMode,
+) -> Result<(), String> {
+    run_sequence(
+        session,
+        mode.step_count() as usize,
+        BACKLIGHT_TEST_DWELL,
+        |session, index| {
+            session.call_lights_preview(&backlight_test_frame(mode, index), false)?;
+            Ok(())
+        },
+    )
 }
 
 /// Enumerates and opens exactly one candidate. Live callers must invoke this in
@@ -1423,6 +1554,52 @@ mod tests {
         )
     }
 
+    fn backlight_test_flow_fake(
+        mode: BacklightTestMode,
+        include_cleanup_reply: bool,
+        failing_request_id: Option<u64>,
+    ) -> (Fake, usize) {
+        let preview_reports = RpcClient::new()
+            .begin_lights_preview(&backlight_test_frame(mode, 0))
+            .unwrap()
+            .reports
+            .len();
+        let cleanup_reports = RpcClient::new()
+            .begin_lights_preview(&preview_off_frame())
+            .unwrap()
+            .reports
+            .len();
+        let mut replies = VecDeque::from([
+            (1, response(101, json!({"version":"0.6.3"}))),
+            (2, response(102, json!({"connected":true}))),
+        ]);
+        let mut writes = 2;
+        let mut request_id = 103;
+        for _ in 0..mode.step_count() {
+            writes += preview_reports;
+            if Some(request_id) != failing_request_id {
+                replies.push_back((writes, response(request_id, Value::Null)));
+            }
+            request_id += 1;
+        }
+        let cleanup_complete = writes + cleanup_reports;
+        if include_cleanup_reply {
+            replies.push_back((cleanup_complete, response(request_id, Value::Null)));
+        }
+        (
+            Fake {
+                now: Duration::ZERO,
+                incoming: VecDeque::new(),
+                writes: Vec::new(),
+                write_count: None,
+                reply_after_writes: replies,
+                fail_read_after_writes: None,
+                read_failure: None,
+            },
+            writes,
+        )
+    }
+
     #[test]
     fn health_check_is_transport_free_and_options_are_validated_first() {
         let result = run_micro_health_check(MicroProbeOptions {
@@ -1504,6 +1681,14 @@ mod tests {
         );
         assert!(
             MicroProbeOptions {
+                backlight_test: Some(BacklightTestMode::Rgb),
+                ..MicroProbeOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MicroProbeOptions {
                 query: true,
                 test_pattern: true,
                 rainbow_backlight: true,
@@ -1515,8 +1700,28 @@ mod tests {
         assert!(
             MicroProbeOptions {
                 query: true,
+                test_pattern: true,
+                backlight_test: Some(BacklightTestMode::Rgb),
+                ..MicroProbeOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MicroProbeOptions {
+                query: true,
                 rainbow_slot: Some(1),
                 rainbow_backlight: true,
+                ..MicroProbeOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MicroProbeOptions {
+                query: true,
+                rainbow_backlight: true,
+                backlight_test: Some(BacklightTestMode::Rgb),
                 ..MicroProbeOptions::default()
             }
             .validate()
@@ -2385,6 +2590,166 @@ mod tests {
                 "backlight":{"effect":"off","brightness":0.0,"speed":0.0,"magic":0.0,"color":0},
                 "underglow":{"effect":"off","brightness":0.0,"speed":0.0,"magic":0.0,"color":0}
             })
+        );
+    }
+
+    #[test]
+    fn backlight_test_rgb_cycles_fixed_visual_sequence_with_expected_dwell() {
+        let (mut fake, _) = backlight_test_flow_fake(BacklightTestMode::Rgb, true, None);
+        let result = run_qualified(
+            &mut fake,
+            &descriptor(),
+            MicroProbeOptions {
+                query: true,
+                backlight_test: Some(BacklightTestMode::Rgb),
+                capture_ms: 0,
+                ..Default::default()
+            },
+        );
+        assert!(result.probe_succeeded, "{:?}", result.error);
+        assert!(result.report.led_test_attempted);
+        assert!(result.report.led_clear_acknowledged);
+        assert_eq!(result.report.elapsed_ms, 5_700);
+        let mut decoder = crate::devices::micro::wire::Decoder::new();
+        let mut params = Vec::new();
+        for report in &fake.writes[2..] {
+            if let Some(message) = decoder.feed(report, Duration::ZERO).unwrap() {
+                params.push(message.as_map()["params"].clone());
+            }
+        }
+        let expected = [
+            0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0xff00ff, 0x00ffff, 0xffffff,
+        ];
+        assert_eq!(params.len(), expected.len() + 1);
+        for (index, color) in expected.into_iter().enumerate() {
+            let value = params[index].as_object().unwrap();
+            assert_eq!(value["backlight"]["effect"], json!("solid"));
+            assert_eq!(value["backlight"]["brightness"], json!(0.25));
+            assert_eq!(value["backlight"]["color"], json!(color));
+            assert_eq!(value["underglow"]["effect"], json!("off"));
+            assert_eq!(value["underglow"]["color"], json!(0));
+        }
+    }
+
+    #[test]
+    fn backlight_test_channel_and_brightness_sequences_use_exact_levels() {
+        for (mode, levels, brightness_mode) in [
+            (
+                BacklightTestMode::Red,
+                vec![0, 32, 64, 128, 192, 255],
+                false,
+            ),
+            (
+                BacklightTestMode::Green,
+                vec![0, 32, 64, 128, 192, 255],
+                false,
+            ),
+            (
+                BacklightTestMode::Blue,
+                vec![0, 32, 64, 128, 192, 255],
+                false,
+            ),
+            (
+                BacklightTestMode::Gray,
+                vec![0, 32, 64, 128, 192, 255],
+                false,
+            ),
+            (
+                BacklightTestMode::Brightness,
+                vec![0, 5, 10, 25, 50, 75, 100],
+                true,
+            ),
+        ] {
+            let (mut fake, _) = backlight_test_flow_fake(mode, true, None);
+            let result = run_qualified(
+                &mut fake,
+                &descriptor(),
+                MicroProbeOptions {
+                    query: true,
+                    backlight_test: Some(mode),
+                    capture_ms: 0,
+                    ..Default::default()
+                },
+            );
+            assert!(result.probe_succeeded, "{mode:?}: {:?}", result.error);
+            let mut decoder = crate::devices::micro::wire::Decoder::new();
+            let mut params = Vec::new();
+            for report in &fake.writes[2..] {
+                if let Some(message) = decoder.feed(report, Duration::ZERO).unwrap() {
+                    params.push(message.as_map()["params"].clone());
+                }
+            }
+            assert_eq!(params.len(), levels.len() + 1, "{mode:?}");
+            for (index, level) in levels.iter().enumerate() {
+                let value = params[index].as_object().unwrap();
+                assert_eq!(
+                    value["underglow"]["effect"],
+                    json!("off"),
+                    "{mode:?} {index}"
+                );
+                if brightness_mode {
+                    assert_eq!(
+                        value["backlight"]["color"],
+                        json!(0x00ff_ffff),
+                        "{mode:?} {index}"
+                    );
+                    let expected = f64::from(*level) / 100.0;
+                    assert_eq!(
+                        value["backlight"]["brightness"],
+                        json!(expected),
+                        "{mode:?} {index}"
+                    );
+                } else {
+                    assert_eq!(
+                        value["backlight"]["brightness"],
+                        json!(0.25),
+                        "{mode:?} {index}"
+                    );
+                    let color = value["backlight"]["color"].as_u64().unwrap() as u32;
+                    let byte = *level as u32;
+                    let expected_color = match mode {
+                        BacklightTestMode::Red => byte << 16,
+                        BacklightTestMode::Green => byte << 8,
+                        BacklightTestMode::Blue => byte,
+                        BacklightTestMode::Gray => (byte << 16) | (byte << 8) | byte,
+                        _ => unreachable!("non-channel mode"),
+                    };
+                    assert_eq!(color, expected_color, "{mode:?} {index}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn backlight_test_timeout_stops_remaining_steps_and_still_cleans_up() {
+        let (mut fake, _) = backlight_test_flow_fake(BacklightTestMode::Red, true, Some(106));
+        let result = run_qualified(
+            &mut fake,
+            &descriptor(),
+            MicroProbeOptions {
+                query: true,
+                backlight_test: Some(BacklightTestMode::Red),
+                capture_ms: 0,
+                ..Default::default()
+            },
+        );
+        assert!(!result.probe_succeeded);
+        assert!(result.report.led_test_attempted);
+        assert!(result.report.led_clear_acknowledged);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("No device response to lights.preview")
+        );
+        let mut decoder = crate::devices::micro::wire::Decoder::new();
+        let mut ids = Vec::new();
+        for report in &fake.writes[2..] {
+            if let Some(message) = decoder.feed(report, Duration::ZERO).unwrap() {
+                ids.push(message.as_map()["id"].clone());
+            }
+        }
+        assert_eq!(
+            ids,
+            vec![json!(103), json!(104), json!(105), json!(106), json!(107)]
         );
     }
 

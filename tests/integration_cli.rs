@@ -252,6 +252,9 @@ fn hid_cli_validation_and_hidden_routes_never_emit_success_output() {
         vec!["micro-probe", "--query", "--rainbow-slot", "0"],
         vec!["micro-probe", "--query", "--rainbow-slot", "7"],
         vec!["micro-probe", "--rainbow-backlight"],
+        vec!["micro-probe", "--backlight-test"],
+        vec!["micro-probe", "--backlight-test", "rgb"],
+        vec!["micro-probe", "--query", "--backlight-test", "invalid"],
         vec![
             "micro-probe",
             "--query",
@@ -271,6 +274,13 @@ fn hid_cli_validation_and_hidden_routes_never_emit_success_output() {
             "--rainbow-slot",
             "1",
             "--test-pattern",
+        ],
+        vec![
+            "micro-probe",
+            "--query",
+            "--backlight-test",
+            "rgb",
+            "--rainbow-backlight",
         ],
         vec!["micro-probe", "--query", "--health-check"],
         vec!["micro-probe", "--exclusive-check", "--query"],
@@ -302,6 +312,7 @@ fn hid_cli_validation_and_hidden_routes_never_emit_success_output() {
     assert!(text.contains("--rainbow-slot <1..6>"));
     assert!(text.contains("--rainbow-backlight"));
     assert!(text.contains("--exclusive-check"));
+    assert!(text.contains("--backlight-test <rgb|red|green|blue|gray|brightness>"));
     assert!(text.contains("akp03-probe"));
     assert!(!text.contains("__probe-worker"));
     assert!(!text.contains("__akp03-worker"));
@@ -312,6 +323,7 @@ fn hid_cli_validation_and_hidden_routes_never_emit_success_output() {
         vec!["micro-probe", "--query", "--rainbow-slot", "3"],
         vec!["micro-probe", "--query", "--rainbow-backlight"],
         vec!["micro-probe", "--exclusive-check", "--capture-ms", "0"],
+        vec!["micro-probe", "--query", "--backlight-test", "rgb"],
         vec!["akp03-probe", "--capture-ms", "0"],
         vec!["akp03-probe", "--initialize", "--test-pattern"],
     ] {

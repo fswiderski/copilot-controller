@@ -18,6 +18,8 @@ pub(super) const MICRO_KIND: &str = "micro_hid_probe";
 pub(super) const AKP03_KIND: &str = "akp03_hid_probe";
 const MICRO_RAINBOW_DWELL_MS: u64 = 3_500;
 const MICRO_RAINBOW_RPC_AND_CLEANUP_MS: u64 = 32_500;
+const MICRO_BACKLIGHT_TEST_DWELL_MS: u64 = 750;
+const MICRO_BACKLIGHT_TEST_RPC_AND_CLEANUP_MS: u64 = 32_500;
 
 #[derive(Clone, Debug)]
 pub(super) enum Options {
@@ -57,11 +59,20 @@ impl Options {
                 if options.exclusive_check {
                     return Duration::from_secs(5);
                 }
+                let backlight_test_dwell = options
+                    .backlight_test
+                    .map(|mode| mode.step_count() * MICRO_BACKLIGHT_TEST_DWELL_MS)
+                    .unwrap_or(0);
                 u64::from(options.capture_ms)
                     + 20_000
                     + if options.read_keymap { 5_000 } else { 0 }
                     + if options.rainbow_slot.is_some() || options.rainbow_backlight {
                         MICRO_RAINBOW_DWELL_MS + MICRO_RAINBOW_RPC_AND_CLEANUP_MS
+                    } else {
+                        0
+                    }
+                    + if options.backlight_test.is_some() {
+                        backlight_test_dwell + MICRO_BACKLIGHT_TEST_RPC_AND_CLEANUP_MS
                     } else {
                         0
                     }
@@ -328,6 +339,15 @@ pub(super) fn parse(args: &[String], micro: bool) -> Result<Options, String> {
                 options.rainbow_slot = Some(slot);
             }
             (Options::Micro(options), "--rainbow-backlight") => options.rainbow_backlight = true,
+            (Options::Micro(options), "--backlight-test") => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| option_error("backlight test mode is required"))?;
+                options.backlight_test = Some(
+                    micro::BacklightTestMode::parse_cli(value)
+                        .ok_or_else(|| option_error("backlight test mode must be rgb, red, green, blue, gray, or brightness"))?,
+                );
+            }
             (Options::Micro(options), "--health-check") => options.health_check = true,
             (Options::Micro(options), "--exclusive-check") => options.exclusive_check = true,
             (Options::Akp03(options), "--initialize") => options.initialize = true,
@@ -430,6 +450,7 @@ fn decode_options(payload: Value, micro: bool) -> Result<Options, worker::Diagno
             "test_pattern",
             "rainbow_slot",
             "rainbow_backlight",
+            "backlight_test",
             "health_check",
             "exclusive_check",
         ]

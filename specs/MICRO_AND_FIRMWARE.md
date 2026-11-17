@@ -27,6 +27,19 @@ acknowledged the final all-off preview without cleanup errors. This is a
 single-unit observation of temporary whole-keypad lighting only, not
 individual-key control, other firmware/platforms, or broad hardware
 qualification. No saved keymap, configuration file, or firmware was changed.
+This visual-only observation is not colorimeter-calibrated fidelity evidence.
+
+On the same date, six macOS ARM64 `micro-probe --query --backlight-test <mode>
+--capture-ms 0` runs exercised `rgb`, `red`, `green`, `blue`, `gray`, and
+`brightness`, with audible countdowns before each sequence. The operator
+confirmed distinct colors uniform across keys, visibly increasing channel
+and gray ramps, increasing white brightness, and all keys dark afterward.
+The `rgb` and `brightness` runs each sent `34` reports (`2176` bytes), read
+`13`, and took `5821ms`/`5822ms`; the other four each sent `30` reports
+(`1920` bytes), read `12`, and took `5004..5027ms`. All six acknowledged
+all-off cleanup without errors. These are single-unit visual observations,
+not calibrated RGB fidelity, individual-key addressability, or qualification
+of other units/platforms. No saved configuration or firmware was changed.
 
 On the same date, a macOS ARM64 `micro-probe --exclusive-check --capture-ms 0`
 verified this unit's USB vendor interface `2` and exact descriptor, acquired
@@ -44,6 +57,8 @@ no AG/ACT app bindings observed. This is recorded as returned data only, not a
 causal explanation for the non-visible rainbow result. The `currentLayer_index`
 value is treated as an external observation only here, not a locally proven
 general indexing rule.
+No AG-to-individual-light bindings were observed, and no claim is made that
+all 13 physical buttons can be independently addressed via these diagnostics.
 
 External protocol notes were read from:
 
@@ -620,6 +635,9 @@ Thus `[false]` permits, `"false"` blocks, `[[0]]` blocks. Unsigned-only heartbea
 | `query` | firmware query, gate, then status |
 | `read_keymap` | requires query; privacy-sensitive keymap result |
 | `test_pattern` | requires query; writes pattern then attempts clear |
+| `rainbow_slot` | requires query; one of six protocol slot LEDs only (`1..6`) |
+| `rainbow_backlight` | requires query; temporary whole-keypad preview cycle |
+| `backlight_test` | requires query; one exact preview sequence mode |
 | `health_check` | conflicts with query/keymap/pattern; no device access |
 
 The programmatic default object has duration `0`, unlike CLI default `2000`. Invalid options produce no writes. A health check cannot be passed to an already-created injected transport runner.
@@ -692,9 +710,14 @@ After qualification, create fresh RPC/input state:
    - `backlight={effect:"solid",brightness:0.25,speed:0.2,magic:0.0,color:<packed24>}`
    - `underglow={effect:"off",brightness:0.0,speed:0.0,magic:0.0,color:0}`
    Dwell `500ms` after each successful frame using injected clock/sleep.
-6. Phase `capture`, acquire for requested duration subject to budgets.
-7. If LED test attempted and no write failed: phase `clear_leds`; clear with shutdown `v.oai.thstatus` after slot/test-pattern runs, or with `lights.preview` both zones off (`effect:"off",brightness:0.0,speed:0.0,magic:0.0,color:0`) after `rainbow_backlight`.
-8. Finalize `elapsed_ms` and phase `complete`/`failed`.
+6. If `backlight_test` is set: phase `led_test`, set attempted **before** the first frame; send one of these exact `lights.preview` sequences with `underglow` always off and dwell `750ms` after each successful frame:
+   - `rgb`: `ff0000`, `00ff00`, `0000ff`, `ffff00`, `ff00ff`, `00ffff`, `ffffff`, each at brightness `0.25`.
+   - `red|green|blue`: channel ramp levels `0,32,64,128,192,255` with other channels `0`, brightness `0.25`.
+   - `gray`: levels `0,32,64,128,192,255` applied to all three channels, brightness `0.25`.
+   - `brightness`: fixed color `ffffff` with brightness `0.0,0.05,0.1,0.25,0.5,0.75,1.0`.
+7. Phase `capture`, acquire for requested duration subject to budgets.
+8. If LED test attempted and no write failed: phase `clear_leds`; clear with shutdown `v.oai.thstatus` after slot/test-pattern runs, or with `lights.preview` both zones off (`effect:"off",brightness:0.0,speed:0.0,magic:0.0,color:0`) after `rainbow_backlight`/`backlight_test`.
+9. Finalize `elapsed_ms` and phase `complete`/`failed`.
 
 Before every RPC other than ID101, drain incoming traffic for a fixed `50ms` interval, queue/record inputs using the same decoder, then write. This is not a wait-until-quiet policy. It applies to cleanup. Response reads use slices of at most `50ms` within the four-second deadline.
 
@@ -739,6 +762,9 @@ Launch same executable's internal diagnostic worker through shared bounded-stdio
 - Normal: `capture_ms +20000ms`.
 - Keymap: another `5000ms`.
 - Rainbow slot cycle: add finite `36000ms` (`3500ms` dwell + bounded RPC/cleanup allowance).
+- Backlight test cycle: add finite bounded preview budget:
+  - `rgb`/`brightness`: `57750ms` (`5250ms` dwell + bounded RPC/cleanup allowance).
+  - `red`/`green`/`blue`/`gray`: `57000ms` (`4500ms` dwell + bounded RPC/cleanup allowance).
 
 Reject deserialized output asserting ready/qualified, inconsistent read-only accounting, or more than `128` captures/inputs. Shared supervisor internals are a separate contract.
 
@@ -748,18 +774,22 @@ Reject deserialized output asserting ready/qualified, inconsistent read-only acc
 `0..30000` (default `2000`) and the valueless `--query`, `--read-keymap`,
 `--test-pattern`, `--rainbow-backlight`, `--health-check`, and
 `--exclusive-check` flags, plus
-`--rainbow-slot <1..6>`.
+`--rainbow-slot <1..6>` and
+`--backlight-test <rgb|red|green|blue|gray|brightness>`.
 `--rainbow-slot` requires `--query`, conflicts with `--test-pattern` and
 `--health-check`, and targets only one of six protocol slot LEDs
 (`v.oai.thstatus` IDs `0..5`), not all physical buttons. Dependency/conflict
 rules above apply regardless of option order. `--rainbow-backlight` requires
 `--query` and conflicts with `--rainbow-slot`, `--test-pattern`, and
-`--health-check`. It uses temporary preview-only output and does not write
-configuration. Unknown, duplicate, missing or malformed options fail before
-worker launch; there is no port/path/command selector.
+`--health-check`. `--backlight-test` requires `--query` and conflicts with
+`--rainbow-slot`, `--rainbow-backlight`, `--test-pattern`, and `--health-check`.
+Preview modes are temporary visual-only output (not calibrated color fidelity),
+do not write configuration, and do not imply 13 independent button lighting.
+Unknown, duplicate, missing or malformed options fail before worker launch;
+there is no port/path/command selector.
 `--exclusive-check` is first-stage only: requires `--capture-ms 0`, rejects
-query/keymap/pattern/rainbow/health flags, and attempts exactly one
-`IOHIDDeviceOpen(..., 0x1)`/`IOHIDDeviceClose(..., 0)` sequence after exact
+query/keymap/pattern/rainbow/backlight-test/health flags, and attempts exactly
+one `IOHIDDeviceOpen(..., 0x1)`/`IOHIDDeviceClose(..., 0)` sequence after exact
 USB vendor-interface-2 descriptor verification.
 
 Live access uses the shared private `__probe-worker` route with a framed,
