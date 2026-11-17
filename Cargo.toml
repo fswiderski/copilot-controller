@@ -37,6 +37,10 @@ name = "macos_worker_fixture"
 path = "src/native/windows_worker/tests/macos_fixture.rs"
 test = false
 
+[[example]]
+name = "micro_hid_contention_lab"
+path = "src/lab/micro_hid_contention_lab.rs"
+
 [[test]]
 name = "windows_worker_integration"
 path = "src/native/windows_worker/tests/windows_integration.rs"
