@@ -29,6 +29,18 @@ individual-key control, other firmware/platforms, or broad hardware
 qualification. No saved keymap, configuration file, or firmware was changed.
 This visual-only observation is not colorimeter-calibrated fidelity evidence.
 
+On the same date, six macOS ARM64 `micro-probe --query --backlight-test <mode>
+--capture-ms 0` runs exercised `rgb`, `red`, `green`, `blue`, `gray`, and
+`brightness`, with audible countdowns before each sequence. The operator
+confirmed distinct colors uniform across keys, visibly increasing channel
+and gray ramps, increasing white brightness, and all keys dark afterward.
+The `rgb` and `brightness` runs each sent `34` reports (`2176` bytes), read
+`13`, and took `5821ms`/`5822ms`; the other four each sent `30` reports
+(`1920` bytes), read `12`, and took `5004..5027ms`. All six acknowledged
+all-off cleanup without errors. These are single-unit visual observations,
+not calibrated RGB fidelity, individual-key addressability, or qualification
+of other units/platforms. No saved configuration or firmware was changed.
+
 On the same date, a macOS ARM64 `micro-probe --exclusive-check --capture-ms 0`
 verified this unit's USB vendor interface `2` and exact descriptor, acquired
 `IOHIDDeviceOpen(..., 0x1)` with native status `0`, and explicitly released it
@@ -760,10 +772,10 @@ Reject deserialized output asserting ready/qualified, inconsistent read-only acc
 
 `micro-probe` accepts only `--capture-ms` followed by unsigned ASCII decimal
 `0..30000` (default `2000`) and the valueless `--query`, `--read-keymap`,
-`--test-pattern`, `--rainbow-backlight`, and `--health-check` flags, plus
+`--test-pattern`, `--rainbow-backlight`, `--health-check`, and
+`--exclusive-check` flags, plus
 `--rainbow-slot <1..6>` and
 `--backlight-test <rgb|red|green|blue|gray|brightness>`.
-`--exclusive-check`.
 `--rainbow-slot` requires `--query`, conflicts with `--test-pattern` and
 `--health-check`, and targets only one of six protocol slot LEDs
 (`v.oai.thstatus` IDs `0..5`), not all physical buttons. Dependency/conflict
