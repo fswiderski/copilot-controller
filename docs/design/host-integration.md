@@ -8,6 +8,9 @@
 
 ## 1. Why this document exists
 
+The separate [fesReview CT input block](fesreview-ct-input.md) is an offline
+candidate lower layer, not an accepted host tier or live action-delivery route.
+
 [`RECONSTRUCTION_BRIEF.md`](../../RECONSTRUCTION_BRIEF.md) and its appendices
 define a read-only diagnostic foundation and an offline six-session engine. They
 say the product is "not a complete interactive terminal controller." They list the
