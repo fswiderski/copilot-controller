@@ -330,6 +330,10 @@ fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
             "__akp03-worker",
             crate::cli::akp03_probe_allowlist().unwrap(),
         ),
+        (
+            "__mx-creative-worker",
+            crate::cli::mx_creative_evidence_allowlist().unwrap(),
+        ),
     ] {
         let error = super::super::maybe_run_hidden_worker([route], &allowlist)
             .unwrap()
@@ -344,6 +348,15 @@ fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
             crate::native::hid::UnavailableReason::UnsupervisedAccess
         ))
     ));
+}
+
+#[test]
+fn macos_mx_creative_request_gets_live_read_authority_without_health_field() {
+    let request = DiagnosticRequest {
+        kind: "mx_creative_evidence".into(),
+        payload: serde_json::json!({"capture_ms":0}),
+    };
+    assert_eq!(request_authority(&request), Ok(ScopeAuthority::HidLive));
 }
 
 #[test]

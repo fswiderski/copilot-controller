@@ -3,4 +3,5 @@ pub mod akp03;
 pub mod ct;
 pub mod firmware;
 pub mod micro;
+pub mod mx_creative;
 pub mod probe_result;

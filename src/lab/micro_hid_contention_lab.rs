@@ -1318,6 +1318,7 @@ fn describe_device(device: CFTypeRef) -> Option<HidDescriptor> {
         max_output_report_len: output_len,
         interface_number: interface_from_ancestry(device, APPLICATION_VID, APPLICATION_PID),
         bus: bus_from_property(device),
+        location_id: None,
         path: HidPath::new(format!("registry:{registry}")).ok()?,
     })
 }
@@ -1930,6 +1931,7 @@ mod tests {
             max_output_report_len: REPORT_SIZE,
             interface_number: Some(2),
             bus: Some(HidBus::Usb),
+            location_id: None,
             path: HidPath::new("unit").unwrap(),
         };
         assert!(is_qualified_micro_descriptor(&base));

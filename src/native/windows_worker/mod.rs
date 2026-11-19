@@ -18,7 +18,17 @@ use serde_json::Value;
 #[cfg(not(windows))]
 use uuid::Uuid;
 
-#[cfg(any(test, all(windows, any(feature = "micro-hid", feature = "akp03-hid"))))]
+#[cfg(any(
+    test,
+    all(
+        windows,
+        any(
+            feature = "micro-hid",
+            feature = "akp03-hid",
+            feature = "mx-creative-hid"
+        )
+    )
+))]
 mod hid_scope;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod macos;
@@ -27,7 +37,14 @@ mod protocol;
 mod supervision;
 #[cfg(windows)]
 mod windows;
-#[cfg(all(windows, any(feature = "micro-hid", feature = "akp03-hid")))]
+#[cfg(all(
+    windows,
+    any(
+        feature = "micro-hid",
+        feature = "akp03-hid",
+        feature = "mx-creative-hid"
+    )
+))]
 pub(crate) use hid_scope::{HidWorkerCapability, hid_worker_capability};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use macos::CtWorkerCapability;
@@ -40,7 +57,11 @@ pub(crate) use macos::worker_health;
 #[cfg(all(
     target_os = "macos",
     target_arch = "aarch64",
-    any(feature = "micro-hid", feature = "akp03-hid")
+    any(
+        feature = "micro-hid",
+        feature = "akp03-hid",
+        feature = "mx-creative-hid"
+    )
 ))]
 pub(crate) use macos::{HidWorkerCapability, hid_worker_capability};
 
@@ -51,12 +72,14 @@ mod tests;
 pub const HIDDEN_WORKER_ARGUMENT: &str = "__probe-worker";
 /// AKP03 uses the same supervisor with a separate kind-only hidden registry.
 pub const AKP03_HIDDEN_WORKER_ARGUMENT: &str = "__akp03-worker";
+pub const MX_CREATIVE_HIDDEN_WORKER_ARGUMENT: &str = "__mx-creative-worker";
 
 /// Fixed same-executable routes, never arbitrary command-line arguments.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticWorkerRoute {
     Shared,
     Akp03,
+    MxCreative,
 }
 
 impl DiagnosticWorkerRoute {
@@ -64,6 +87,7 @@ impl DiagnosticWorkerRoute {
         match self {
             Self::Shared => HIDDEN_WORKER_ARGUMENT,
             Self::Akp03 => AKP03_HIDDEN_WORKER_ARGUMENT,
+            Self::MxCreative => MX_CREATIVE_HIDDEN_WORKER_ARGUMENT,
         }
     }
 }

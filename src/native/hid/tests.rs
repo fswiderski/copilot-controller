@@ -17,6 +17,7 @@ fn desc(id: HidIdentity, page: u16, path: &str) -> HidDescriptor {
         max_output_report_len: 32,
         interface_number: None,
         bus: None,
+        location_id: None,
         path: HidPath::new(path).unwrap(),
     }
 }
@@ -94,6 +95,30 @@ fn open_rejects_unknown_and_oversized_descriptors() {
         Err(HidError::InvalidArgument(_))
     ));
     assert_eq!(b.state.borrow().open_calls, 1);
+}
+
+#[test]
+fn filtered_open_requires_exact_unique_bounded_input_frames() {
+    let d = desc(ID, 0xff00, "a");
+    let b = FakeBackend::new(vec![d.clone()]);
+    for reports in [
+        &[][..],
+        &[(17, 0)][..],
+        &[(17, 65)][..],
+        &[(17, 8), (17, 9)][..],
+    ] {
+        assert!(HidDevice::open_filtered(&b, &d, reports).is_err());
+    }
+    let mut device = HidDevice::open_filtered(&b, &d, &[(17, 20), (19, 32)]).unwrap();
+    assert_eq!(
+        device.write_report(&[1, 2]),
+        Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite))
+    );
+    assert_eq!(
+        device.read_report(20, Duration::from_millis(1)),
+        Err(HidError::Timeout)
+    );
+    assert!(b.state.borrow().written.is_empty());
 }
 
 #[test]

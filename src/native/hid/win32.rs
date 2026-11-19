@@ -349,6 +349,7 @@ fn describe(
             // No documented exact collection-handle source for bInterfaceNumber.
             interface_number: None,
             bus: bus.classification(),
+            location_id: None,
             path,
         },
         bus,

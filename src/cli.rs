@@ -3,6 +3,7 @@
 
 mod ct_probe;
 mod hid_probe;
+mod mx_creative_evidence;
 
 use std::{
     io::Read,
@@ -15,7 +16,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
-    devices::{akp03, firmware, micro},
+    devices::{akp03, firmware, micro, mx_creative},
     native::{
         portable::{clock::sample_monotonic, inventory::portable_inventory},
         windows_observation as observation, windows_worker as worker,
@@ -60,6 +61,7 @@ Usage: copilot-controller <command>
            [--io-timeout-ms <100..1500>] [--capture-ms <0..5000>]
            [--max-events <1..128>] [--max-received-bytes <256..32768>]
            [--test-pattern] (explicit contained serial diagnostic)
+  mx-creative-evidence [--capture-ms <0..30000>] (finite read-only HID evidence)
 
 All previews and probes are not ready or hardware-qualified. Native probes use
 contained Windows workers or macOS ARM64 workers.
@@ -114,6 +116,7 @@ pub enum Command {
     CtProbe(crate::devices::ct::probe::Options),
     MicroProbe(micro::probe::MicroProbeOptions),
     Akp03Probe(akp03::probe::Akp03ProbeOptions),
+    MxCreativeEvidence(mx_creative::probe::Options),
     FirmwarePlan {
         image: PathBuf,
         tool: PathBuf,
@@ -267,6 +270,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "device-assign" => return assignment(args),
         "micro-decode" => return micro_reports(args),
         "ct-probe" => return ct_probe::parse(args).map(Command::CtProbe),
+        "mx-creative-evidence" => {
+            return mx_creative_evidence::parse(args).map(Command::MxCreativeEvidence);
+        }
         "micro-probe" | "akp03-probe" => {
             return hid_probe::parse(args, name == "micro-probe").map(|options| match options {
                 hid_probe::Options::Micro(options) => Command::MicroProbe(options),
@@ -388,10 +394,11 @@ fn capabilities() -> Value {
         "qualification": "foundation_only",
         "inventory": portable_inventory(),
         "offline_codecs": ["micro", "akp03-original", "akp03e-rev2", "ct-pid-0003"],
-        "hardware_backend_available": ct_serial_probe_available || cfg!(all(target_os = "macos", target_arch = "aarch64", any(feature = "micro-hid", feature = "akp03-hid"))),
+        "hardware_backend_available": ct_serial_probe_available || cfg!(all(target_os = "macos", target_arch = "aarch64", any(feature = "micro-hid", feature = "akp03-hid", feature = "mx-creative-hid"))),
         "ct_serial_probe_available": ct_serial_probe_available,
         "micro_hid_probe_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "micro-hid")),
         "akp03_hid_probe_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "akp03-hid")),
+        "mx_creative_evidence_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
         "firmware_execution_available": false,
         "runtime_owner_acquired": false,
         "state_store_api_available": cfg!(any(target_os = "linux", target_os = "macos")),
@@ -399,6 +406,7 @@ fn capabilities() -> Value {
         "build_features": {
             "akp03_hid": cfg!(feature = "akp03-hid"),
             "micro_hid": cfg!(feature = "micro-hid"),
+            "mx_creative_hid": cfg!(feature = "mx-creative-hid"),
             "micro_firmware": cfg!(feature = "micro-firmware"),
         },
         "limitations": ["Availability is compile-time support, not native evidence or hardware acceptance. Native CLI probing requires explicit opt-in and a contained Windows or macOS ARM64 worker.",
@@ -573,6 +581,7 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
         Command::CtProbe(options) => ct_probe::execute(options),
         Command::MicroProbe(options) => hid_probe::execute(hid_probe::Options::Micro(options)),
         Command::Akp03Probe(options) => hid_probe::execute(hid_probe::Options::Akp03(options)),
+        Command::MxCreativeEvidence(options) => mx_creative_evidence::execute(options),
         Command::FirmwarePlan { image, tool } => {
             if !cfg!(feature = "micro-firmware") {
                 return Err(
@@ -602,6 +611,11 @@ static AKP03_CALLBACKS: [worker::DiagnosticCallback; 1] = [worker::DiagnosticCal
     hid_probe::akp03_callback,
 )];
 
+static MX_CREATIVE_CALLBACKS: [worker::DiagnosticCallback; 1] = [worker::DiagnosticCallback::new(
+    mx_creative_evidence::KIND,
+    mx_creative_evidence::callback,
+)];
+
 static DIAGNOSTIC_CALLBACKS: [worker::DiagnosticCallback; 4] = [
     worker::DiagnosticCallback::new("health", health_callback),
     worker::DiagnosticCallback::new(ct_probe::KIND, ct_probe::callback),
@@ -629,6 +643,14 @@ pub fn akp03_probe_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
     worker::DiagnosticAllowlist::new_for_route(
         &AKP03_CALLBACKS,
         worker::DiagnosticWorkerRoute::Akp03,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn mx_creative_evidence_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
+    worker::DiagnosticAllowlist::new_for_route(
+        &MX_CREATIVE_CALLBACKS,
+        worker::DiagnosticWorkerRoute::MxCreative,
     )
     .map_err(|error| error.to_string())
 }
@@ -692,6 +714,13 @@ fn health_callback(payload: Value) -> Result<Value, worker::DiagnosticCallbackEr
 
 #[cfg(any(
     all(target_os = "macos", target_arch = "aarch64"),
-    all(windows, any(feature = "micro-hid", feature = "akp03-hid"))
+    all(
+        windows,
+        any(
+            feature = "micro-hid",
+            feature = "akp03-hid",
+            feature = "mx-creative-hid"
+        )
+    )
 ))]
 pub(crate) use hid_probe::validate_worker_options;

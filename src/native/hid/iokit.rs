@@ -158,6 +158,15 @@ fn prop_string(dev: CFTypeRef, key: &str) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+fn prop_u32(dev: CFTypeRef, key: &str) -> Option<u32> {
+    prop_i32(dev, key)
+        .and_then(|value| u32::try_from(value).ok())
+        .or_else(|| {
+            let value = prop_i32(dev, key)?;
+            Some(u32::from_ne_bytes(value.to_ne_bytes()))
+        })
+}
+
 fn entry_id(dev: CFTypeRef) -> Option<u64> {
     // SAFETY: borrowed device; out-pointer is valid.
     let svc = unsafe { IOHIDDeviceGetService(dev) };
@@ -166,6 +175,18 @@ fn entry_id(dev: CFTypeRef) -> Option<u64> {
     }
     let mut id = 0u64;
     (unsafe { IORegistryEntryGetRegistryEntryID(svc, &mut id) } == 0).then_some(id)
+}
+
+fn classify_transport(transport: &str) -> HidBus {
+    if transport.eq_ignore_ascii_case("usb") {
+        HidBus::Usb
+    } else if transport.eq_ignore_ascii_case("bluetooth")
+        || transport.eq_ignore_ascii_case("Bluetooth Low Energy")
+    {
+        HidBus::Bluetooth
+    } else {
+        HidBus::Unknown
+    }
 }
 
 struct IoOwned(u32);
@@ -402,15 +423,8 @@ fn describe(dev: CFTypeRef, identity: HidIdentity) -> Option<HidDescriptor> {
         max_input_report_len: size("MaxInputReportSize"),
         max_output_report_len: size("MaxOutputReportSize"),
         interface_number: interface_number(dev, identity),
-        bus: prop_string(dev, "Transport").map(|transport| {
-            if transport.eq_ignore_ascii_case("usb") {
-                HidBus::Usb
-            } else if transport.eq_ignore_ascii_case("bluetooth") {
-                HidBus::Bluetooth
-            } else {
-                HidBus::Unknown
-            }
-        }),
+        bus: prop_string(dev, "Transport").map(|transport| classify_transport(&transport)),
+        location_id: prop_u32(dev, "LocationID"),
         path: HidPath::new(path_for(id)).ok()?,
     })
 }
@@ -425,6 +439,10 @@ fn same_open_identity(
     reopened.identity == selected.identity
         && reopened.interface_number == selected.interface_number
         && reopened.bus == selected.bus
+        && reopened.location_id == selected.location_id
+        && reopened.max_input_report_len == selected.max_input_report_len
+        && reopened.max_output_report_len == selected.max_output_report_len
+        && reopened.product == selected.product
         && reopened.path == selected.path
         && usage_matches
 }
@@ -453,14 +471,22 @@ impl HidBackend for IoKitHid {
     }
 
     fn open(&self, d: &HidDescriptor) -> Result<Box<dyn HidTransport>, HidError> {
-        self.open_with_policy(d, false)
+        self.open_with_policy(d, false, None)
+    }
+
+    fn open_filtered(
+        &self,
+        d: &HidDescriptor,
+        reports: &[(u8, usize)],
+    ) -> Result<Box<dyn HidTransport>, HidError> {
+        self.open_with_policy(d, false, Some(reports.to_vec()))
     }
 
     fn open_allowing_usage_change(
         &self,
         d: &HidDescriptor,
     ) -> Result<Box<dyn HidTransport>, HidError> {
-        self.open_with_policy(d, true)
+        self.open_with_policy(d, true, None)
     }
 
     fn original_report_descriptor(&self, d: &HidDescriptor) -> Result<Vec<u8>, HidError> {
@@ -470,6 +496,21 @@ impl HidBackend for IoKitHid {
         original_report_descriptor(dev).ok_or(HidError::EvidenceUnavailable(
             EvidenceKind::RawReportDescriptor,
         ))
+    }
+
+    fn original_report_descriptor_evidence(
+        &self,
+        d: &HidDescriptor,
+    ) -> Result<ReportDescriptorEvidence, HidError> {
+        self.authorize()?;
+        let matched = Matched::new(d.identity)?;
+        let dev = self.find_device(&matched, d, false)?;
+        let (property_type, bytes) = original_report_descriptor_property(dev);
+        Ok(ReportDescriptorEvidence {
+            bytes: bytes.unwrap_or_default(),
+            source_path: path_for(entry_id(dev).ok_or(HidError::NotFound)?),
+            property_type: property_type.into(),
+        })
     }
 
     fn open_exclusive_probe(&self, d: &HidDescriptor) -> Result<ExclusiveOpenProbe, HidError> {
@@ -518,6 +559,7 @@ impl IoKitHid {
         &self,
         d: &HidDescriptor,
         allow_usage_change: bool,
+        filter: Option<Vec<(u8, usize)>>,
     ) -> Result<Box<dyn HidTransport>, HidError> {
         self.authorize()?;
         let matched = Matched::new(d.identity)?;
@@ -542,6 +584,7 @@ impl IoKitHid {
         let mut state = Box::new(InputState {
             buf: vec![0u8; MAX_REPORT_LEN],
             queue: VecDeque::new(),
+            filter,
         });
         let ctx = (&raw mut *state).cast::<c_void>();
         // SAFETY: `state` (and its fixed-size buffer) outlives the registration: Drop
@@ -640,6 +683,7 @@ fn exclusive_open_probe_sequence(
 struct InputState {
     buf: Vec<u8>,
     queue: VecDeque<Vec<u8>>,
+    filter: Option<Vec<(u8, usize)>>,
 }
 
 extern "C" fn on_input(
@@ -672,7 +716,12 @@ extern "C" fn on_input(
         out.push(id as u8);
     }
     out.extend_from_slice(data);
-    if out.len() <= MAX_REPORT_LEN {
+    if out.len() <= MAX_REPORT_LEN
+        && state
+            .filter
+            .as_ref()
+            .is_none_or(|filter| filter.contains(&(id as u8, out.len())))
+    {
         state.queue.push_back(out);
     }
 }
@@ -687,22 +736,41 @@ struct MacTransport {
 }
 
 fn original_report_descriptor(dev: CFTypeRef) -> Option<Vec<u8>> {
-    let key = cfstr("ReportDescriptor")?;
+    original_report_descriptor_property(dev).1
+}
+
+fn original_report_descriptor_property(dev: CFTypeRef) -> (&'static str, Option<Vec<u8>>) {
+    let Some(key) = cfstr("ReportDescriptor") else {
+        return ("key_creation_failed", None);
+    };
     // SAFETY: borrowed property from a live IOHIDDevice.
     let data = unsafe { IOHIDDeviceGetProperty(dev, key.0) };
-    if data.is_null() || unsafe { CFGetTypeID(data) != CFDataGetTypeID() } {
-        return None;
+    if data.is_null() {
+        return ("missing", None);
+    }
+    if unsafe { CFGetTypeID(data) != CFDataGetTypeID() } {
+        let property_type = if unsafe { CFGetTypeID(data) == CFStringGetTypeID() } {
+            "cfstring"
+        } else if unsafe { CFGetTypeID(data) == CFNumberGetTypeID() } {
+            "cfnumber"
+        } else {
+            "other"
+        };
+        return (property_type, None);
     }
     let len = unsafe { CFDataGetLength(data) };
     if !(1..=1024).contains(&len) {
-        return None;
+        return ("cfdata_out_of_bounds", None);
     }
     let ptr = unsafe { CFDataGetBytePtr(data) };
     if ptr.is_null() {
-        return None;
+        return ("cfdata_null", None);
     }
     // SAFETY: CFData owns `len` contiguous bytes and remains alive for this copy.
-    Some(unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec())
+    (
+        "cfdata",
+        Some(unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec()),
+    )
 }
 
 impl Drop for MacTransport {
@@ -818,6 +886,61 @@ pub(crate) fn fixture_output(
 mod tests {
     use super::*;
     use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
+    #[test]
+    fn transport_classification_accepts_only_documented_exact_names() {
+        for (transport, expected) in [
+            ("USB", HidBus::Usb),
+            ("usb", HidBus::Usb),
+            ("Bluetooth", HidBus::Bluetooth),
+            ("bluetooth", HidBus::Bluetooth),
+            ("Bluetooth Low Energy", HidBus::Bluetooth),
+            ("BLUETOOTH LOW ENERGY", HidBus::Bluetooth),
+            ("Bluetooth Low Energy 2", HidBus::Unknown),
+            ("Low Energy", HidBus::Unknown),
+            ("USB Low Energy", HidBus::Unknown),
+        ] {
+            assert_eq!(classify_transport(transport), expected, "{transport}");
+        }
+    }
+
+    #[test]
+    fn input_callback_retains_only_exact_vendor_frames_with_a_bounded_queue() {
+        let mut state = Box::new(InputState {
+            buf: vec![0; MAX_REPORT_LEN],
+            queue: VecDeque::new(),
+            filter: Some(vec![(17, 20)]),
+        });
+        let context = (&raw mut *state).cast::<c_void>();
+        let mut mouse = [2, 0, 0];
+        on_input(
+            context,
+            0,
+            null_mut(),
+            0,
+            2,
+            mouse.as_mut_ptr(),
+            mouse.len() as CFIndex,
+        );
+        assert!(state.queue.is_empty());
+
+        let mut vendor = [17; 20];
+        for index in 0..65 {
+            vendor[1] = index;
+            on_input(
+                context,
+                0,
+                null_mut(),
+                0,
+                17,
+                vendor.as_mut_ptr(),
+                vendor.len() as CFIndex,
+            );
+        }
+        assert_eq!(state.queue.len(), MAX_QUEUED);
+        assert_eq!(state.queue.front().unwrap()[0], 17);
+        assert_eq!(state.queue.back().unwrap()[1], 63);
+    }
 
     #[test]
     fn stopped_or_finished_run_loop_fails_without_spinning_or_hardware() {
@@ -1213,6 +1336,7 @@ mod tests {
             max_output_report_len: REPORT_SIZE,
             interface_number: Some(2),
             bus: Some(HidBus::Usb),
+            location_id: None,
             path: HidPath::new("iokit-test").unwrap(),
         }
     }

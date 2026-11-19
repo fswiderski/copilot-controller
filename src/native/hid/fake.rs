@@ -58,6 +58,17 @@ impl HidBackend for FakeBackend {
         Ok(Box::new(FakeTransport(self.state.clone())))
     }
 
+    fn open_filtered(
+        &self,
+        d: &HidDescriptor,
+        reports: &[(u8, usize)],
+    ) -> Result<Box<dyn HidTransport>, HidError> {
+        if reports.is_empty() || reports.iter().any(|(_, length)| *length == 0) {
+            return Err(HidError::Protocol("invalid fake report filter"));
+        }
+        self.open(d)
+    }
+
     fn original_report_descriptor(&self, d: &HidDescriptor) -> Result<Vec<u8>, HidError> {
         let mut state = self.state.borrow_mut();
         state.descriptor_calls += 1;

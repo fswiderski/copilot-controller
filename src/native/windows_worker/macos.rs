@@ -20,7 +20,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
+#[cfg(any(
+    feature = "micro-hid",
+    feature = "akp03-hid",
+    feature = "mx-creative-hid",
+    test
+))]
 use std::rc::Rc;
 
 use serde_json::{Value, json};
@@ -46,7 +51,6 @@ thread_local! {
     static WORKER_SCOPE: Cell<Option<(ScopeAuthority, Uuid)>> = const { Cell::new(None) };
     static WATCHDOG_PARENT: Cell<Option<WorkerIdentity>> = const { Cell::new(None) };
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScopeAuthority {
     Health,
@@ -82,7 +86,12 @@ impl Drop for WorkerScope {
 
 /// No public constructor; neither health nor ordinary in-process callers get it.
 #[derive(Clone)]
-#[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
+#[cfg(any(
+    feature = "micro-hid",
+    feature = "akp03-hid",
+    feature = "mx-creative-hid",
+    test
+))]
 pub(crate) struct HidWorkerCapability {
     pid: libc::pid_t,
     scope_nonce: Uuid,
@@ -90,7 +99,12 @@ pub(crate) struct HidWorkerCapability {
     _thread_bound: PhantomData<Rc<()>>,
 }
 
-#[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
+#[cfg(any(
+    feature = "micro-hid",
+    feature = "akp03-hid",
+    feature = "mx-creative-hid",
+    test
+))]
 impl HidWorkerCapability {
     pub(crate) fn valid(&self) -> bool {
         WORKER_SCOPE.with(|scope| scope.get() == Some((ScopeAuthority::HidLive, self.scope_nonce)))
@@ -102,7 +116,12 @@ impl HidWorkerCapability {
     }
 }
 
-#[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
+#[cfg(any(
+    feature = "micro-hid",
+    feature = "akp03-hid",
+    feature = "mx-creative-hid",
+    test
+))]
 pub(crate) fn hid_worker_capability() -> Option<HidWorkerCapability> {
     let (authority, scope_nonce) = WORKER_SCOPE.with(Cell::get)?;
     let parent = WATCHDOG_PARENT.with(Cell::get)?;
@@ -199,6 +218,13 @@ pub(super) fn validate_platform_request(request: &DiagnosticRequest) -> Result<D
             request.kind == "micro_hid_probe",
         )
         .map_err(|_| Kind::InvalidRequest),
+        "mx_creative_evidence" => {
+            let options: crate::devices::mx_creative::probe::Options =
+                serde_json::from_value(request.payload.clone())
+                    .map_err(|_| Kind::InvalidRequest)?;
+            options.validate().map_err(|_| Kind::InvalidRequest)?;
+            Ok(options.budget())
+        }
         "ct_serial_probe" => {
             let options: crate::devices::ct::probe::Options =
                 serde_json::from_value(request.payload.clone())
@@ -211,6 +237,22 @@ pub(super) fn validate_platform_request(request: &DiagnosticRequest) -> Result<D
             ))
         }
         _ => Err(Kind::UnsupportedPlatform),
+    }
+}
+
+fn request_authority(request: &DiagnosticRequest) -> Result<ScopeAuthority, Kind> {
+    match request.kind.as_str() {
+        "health" => Ok(ScopeAuthority::Health),
+        "ct_serial_probe" => Ok(ScopeAuthority::CtSerialProbe),
+        "mx_creative_evidence" => Ok(ScopeAuthority::HidLive),
+        "micro_hid_probe" | "akp03_hid_probe" => {
+            if request.payload["health_check"] == false {
+                Ok(ScopeAuthority::HidLive)
+            } else {
+                Ok(ScopeAuthority::HidHealth)
+            }
+        }
+        _ => Err(Kind::InvalidRequest),
     }
 }
 
@@ -452,18 +494,7 @@ pub(super) fn worker_main(allowlist: &DiagnosticAllowlist) -> Result<(), WorkerE
         let callback = allowlist
             .find(&envelope.request.kind)
             .ok_or(Kind::InvalidRequest)?;
-        let authority = match envelope.request.kind.as_str() {
-            "health" => ScopeAuthority::Health,
-            "ct_serial_probe" => ScopeAuthority::CtSerialProbe,
-            "micro_hid_probe" | "akp03_hid_probe" => {
-                if envelope.request.payload["health_check"] == false {
-                    ScopeAuthority::HidLive
-                } else {
-                    ScopeAuthority::HidHealth
-                }
-            }
-            _ => return Err(Kind::InvalidRequest),
-        };
+        let authority = request_authority(&envelope.request)?;
         let _scope = WorkerScope::enter(authority)?;
         let outcome = protocol::invoke_callback(callback, envelope.request.payload);
         let frame = protocol::encode_response(&outcome, envelope.request_nonce, worker)?;

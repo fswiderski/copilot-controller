@@ -36,20 +36,32 @@ mod platform;
 pub use platform::{HidFeature, PlatformSupport, platform_support};
 
 #[cfg(all(
-    any(feature = "akp03-hid", feature = "micro-hid"),
+    any(
+        feature = "akp03-hid",
+        feature = "micro-hid",
+        feature = "mx-creative-hid"
+    ),
     target_os = "macos",
     target_arch = "aarch64"
 ))]
 mod iokit;
 #[cfg(all(
     test,
-    any(feature = "akp03-hid", feature = "micro-hid"),
+    any(
+        feature = "akp03-hid",
+        feature = "micro-hid",
+        feature = "mx-creative-hid"
+    ),
     target_os = "macos",
     target_arch = "aarch64"
 ))]
 pub(crate) use iokit::fixture_output;
 #[cfg(all(
-    any(feature = "akp03-hid", feature = "micro-hid"),
+    any(
+        feature = "akp03-hid",
+        feature = "micro-hid",
+        feature = "mx-creative-hid"
+    ),
     windows,
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -57,7 +69,11 @@ mod win32;
 #[cfg(any(
     test,
     all(
-        any(feature = "akp03-hid", feature = "micro-hid"),
+        any(
+            feature = "akp03-hid",
+            feature = "micro-hid",
+            feature = "mx-creative-hid"
+        ),
         windows,
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
@@ -73,6 +89,7 @@ mod tests;
 pub const MAX_REPORT_LEN: usize = 1025;
 /// Largest original HID report descriptor accepted by the evidence boundary.
 pub const MAX_REPORT_DESCRIPTOR_LEN: usize = 1024;
+const MAX_DEVICE_OUTPUT_REPORT_LEN: usize = 4095;
 /// Largest number of descriptors a single enumeration may return.
 pub const MAX_ENUMERATED_DEVICES: usize = 64;
 /// Longest accepted read timeout.
@@ -136,7 +153,16 @@ pub struct HidDescriptor {
     pub interface_number: Option<i32>,
     /// Native bus classification; never inferred from a device path.
     pub bus: Option<HidBus>,
+    /// Native USB LocationID when exposed; never inferred.
+    pub location_id: Option<u32>,
     pub path: HidPath,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReportDescriptorEvidence {
+    pub bytes: Vec<u8>,
+    pub source_path: String,
+    pub property_type: String,
 }
 
 /// Selection criteria; vendor and product are mandatory so no blanket scan exists.
@@ -165,7 +191,7 @@ impl HidMatcher {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnavailableReason {
-    /// Neither `akp03-hid` nor `micro-hid` was compiled in.
+    /// No device-specific HID feature was compiled in.
     FeatureDisabled,
     UnsupportedPlatform,
     /// The transport lacks supervised write authority.
@@ -231,6 +257,18 @@ pub trait HidBackend {
     -> Result<Vec<HidDescriptor>, HidError>;
     fn open(&self, descriptor: &HidDescriptor) -> Result<Box<dyn HidTransport>, HidError>;
 
+    /// Opens with native callback retention restricted to exact report IDs and
+    /// normalized total lengths. Implementations without this support fail closed.
+    fn open_filtered(
+        &self,
+        _descriptor: &HidDescriptor,
+        _reports: &[(u8, usize)],
+    ) -> Result<Box<dyn HidTransport>, HidError> {
+        Err(HidError::Unavailable(
+            UnavailableReason::UnsupportedPlatform,
+        ))
+    }
+
     /// Opens a composite-interface candidate whose primary usage may differ
     /// after reopening. Implementations should preserve every other identity check.
     fn open_allowing_usage_change(
@@ -245,6 +283,17 @@ pub trait HidBackend {
         Err(HidError::EvidenceUnavailable(
             EvidenceKind::RawReportDescriptor,
         ))
+    }
+
+    fn original_report_descriptor_evidence(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> Result<ReportDescriptorEvidence, HidError> {
+        Ok(ReportDescriptorEvidence {
+            bytes: self.original_report_descriptor(descriptor)?,
+            source_path: descriptor.path.as_str().to_owned(),
+            property_type: "backend".into(),
+        })
     }
 
     /// Attempts a single exclusive open/close sequence for diagnostics.
@@ -285,6 +334,28 @@ pub trait HidTransport {
     }
 }
 
+struct ReadOnlyTransport {
+    inner: Box<dyn HidTransport>,
+}
+
+impl HidTransport for ReadOnlyTransport {
+    fn supports_write(&self) -> bool {
+        false
+    }
+
+    fn write(&mut self, _report: &[u8]) -> Result<usize, HidError> {
+        Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite))
+    }
+
+    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, HidError> {
+        self.inner.read(buf, timeout)
+    }
+
+    fn report_descriptor(&mut self) -> Result<Vec<u8>, HidError> {
+        self.inner.report_descriptor()
+    }
+}
+
 /// An explicitly opened device with bounds enforced on every call.
 pub struct HidDevice {
     descriptor: HidDescriptor,
@@ -312,6 +383,33 @@ impl HidDevice {
         descriptor: &HidDescriptor,
     ) -> Result<Self, HidError> {
         Self::open_with(backend, descriptor, true)
+    }
+
+    pub fn open_filtered(
+        backend: &dyn HidBackend,
+        descriptor: &HidDescriptor,
+        reports: &[(u8, usize)],
+    ) -> Result<Self, HidError> {
+        validate_read_descriptor(descriptor)?;
+        if reports.is_empty()
+            || reports.len() > 16
+            || reports
+                .iter()
+                .any(|(_, len)| *len == 0 || *len > descriptor.max_input_report_len)
+        {
+            return Err(HidError::InvalidArgument(ArgumentError::BufferEmpty));
+        }
+        let mut ids = reports.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+        ids.sort_unstable();
+        if ids.windows(2).any(|ids| ids[0] == ids[1]) {
+            return Err(HidError::InvalidArgument(ArgumentError::LimitInvalid));
+        }
+        Ok(Self {
+            descriptor: descriptor.clone(),
+            transport: Box::new(ReadOnlyTransport {
+                inner: backend.open_filtered(descriptor, reports)?,
+            }),
+        })
     }
 
     fn open_with(
@@ -398,6 +496,15 @@ fn validate_descriptor(d: &HidDescriptor) -> Result<(), HidError> {
     Ok(())
 }
 
+fn validate_read_descriptor(d: &HidDescriptor) -> Result<(), HidError> {
+    if d.max_input_report_len > MAX_REPORT_LEN
+        || d.max_output_report_len > MAX_DEVICE_OUTPUT_REPORT_LEN
+    {
+        return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
+    }
+    Ok(())
+}
+
 /// Enumerates metadata only; validates limit and filters through `matcher` again
 /// so a misbehaving backend cannot widen the result.
 pub fn enumerate(
@@ -413,7 +520,7 @@ pub fn enumerate(
         return Err(HidError::TooManyDevices);
     }
     for d in &found {
-        validate_descriptor(d)?;
+        validate_read_descriptor(d)?;
         if !matcher.matches(d) {
             return Err(HidError::Protocol("backend returned unmatched descriptor"));
         }
@@ -428,7 +535,11 @@ pub fn enumerate(
 /// no device.
 pub fn native_backend() -> Result<Box<dyn HidBackend>, HidError> {
     match platform_support(
-        cfg!(any(feature = "akp03-hid", feature = "micro-hid")),
+        cfg!(any(
+            feature = "akp03-hid",
+            feature = "micro-hid",
+            feature = "mx-creative-hid"
+        )),
         std::env::consts::OS,
         std::env::consts::ARCH,
     ) {
@@ -438,7 +549,11 @@ pub fn native_backend() -> Result<Box<dyn HidBackend>, HidError> {
 }
 
 #[cfg(all(
-    any(feature = "akp03-hid", feature = "micro-hid"),
+    any(
+        feature = "akp03-hid",
+        feature = "micro-hid",
+        feature = "mx-creative-hid"
+    ),
     windows,
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -447,7 +562,11 @@ fn native_backend_impl() -> Result<Box<dyn HidBackend>, HidError> {
 }
 
 #[cfg(all(
-    any(feature = "akp03-hid", feature = "micro-hid"),
+    any(
+        feature = "akp03-hid",
+        feature = "micro-hid",
+        feature = "mx-creative-hid"
+    ),
     target_os = "macos",
     target_arch = "aarch64"
 ))]
@@ -457,12 +576,20 @@ fn native_backend_impl() -> Result<Box<dyn HidBackend>, HidError> {
 
 #[cfg(not(any(
     all(
-        any(feature = "akp03-hid", feature = "micro-hid"),
+        any(
+            feature = "akp03-hid",
+            feature = "micro-hid",
+            feature = "mx-creative-hid"
+        ),
         windows,
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
     all(
-        any(feature = "akp03-hid", feature = "micro-hid"),
+        any(
+            feature = "akp03-hid",
+            feature = "micro-hid",
+            feature = "mx-creative-hid"
+        ),
         target_os = "macos",
         target_arch = "aarch64"
     )

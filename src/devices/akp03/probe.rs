@@ -504,6 +504,7 @@ mod tests {
             max_output_report_len: REPORT_LEN,
             interface_number: Some(0),
             bus: Some(HidBus::Usb),
+            location_id: Some(0x0200_0000),
             path: crate::native::hid::HidPath::new("fake-akp03").unwrap(),
         }
     }

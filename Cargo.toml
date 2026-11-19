@@ -19,6 +19,7 @@ default = []
 # macOS ARM64); other targets report typed unavailability. No updater backend.
 akp03-hid = []
 micro-hid = []
+mx-creative-hid = []
 # Offline pinned-artifact validation must not implicitly enable native HID.
 micro-firmware = []
 

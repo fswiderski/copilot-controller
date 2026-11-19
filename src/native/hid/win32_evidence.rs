@@ -220,6 +220,7 @@ mod tests {
                 max_output_report_len: 64,
                 interface_number: None,
                 bus: bus.classification(),
+                location_id: None,
                 path: HidPath::new(r"\\?\hid#vid_0300&pid_3010&mi_00").unwrap(),
             },
             bus,
