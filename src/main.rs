@@ -7,6 +7,12 @@ use copilot_controller::{cli, native::windows_worker};
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if let Some(result) = windows_worker::maybe_run_mx_creative_review_worker(&args) {
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => failure(error.to_string()),
+        };
+    }
     let allowlist = match if args
         .first()
         .is_some_and(|argument| argument == windows_worker::AKP03_HIDDEN_WORKER_ARGUMENT)
@@ -37,9 +43,17 @@ fn main() -> ExitCode {
         Ok(args) => args,
         Err(_) => return failure("arguments must be valid UTF-8".into()),
     };
-    let output = cli::parse(&args)
-        .and_then(|command| cli::execute(command, io::stdin().lock()))
-        .and_then(cli::Output::render);
+    let command = match cli::parse(&args) {
+        Ok(command) => command,
+        Err(error) => return failure(error),
+    };
+    if matches!(command, cli::Command::ReviewInput) {
+        return match cli::execute_review_input() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => failure(error),
+        };
+    }
+    let output = cli::execute(command, io::stdin().lock()).and_then(cli::Output::render);
     match output {
         Ok(text) => match io::stdout().lock().write_all(text.as_bytes()) {
             Ok(()) => ExitCode::SUCCESS,

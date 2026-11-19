@@ -150,6 +150,63 @@ struct ClockedHid<'a> {
     _borrow: std::marker::PhantomData<&'a ()>,
 }
 
+pub(crate) struct LiveDevices {
+    keypad: HidDevice,
+    dialpad: HidDevice,
+}
+
+impl LiveDevices {
+    pub(crate) fn open(backend: &dyn HidBackend) -> std::result::Result<Self, String> {
+        let keypad = select(
+            backend,
+            HidMatcher {
+                identity: HidIdentity {
+                    vendor_id: VID,
+                    product_id: KEYPAD_PID,
+                },
+                usage_page: Some(VENDOR_PAGE),
+                usage: Some(KEYPAD_USAGE),
+            },
+            Role::Keypad,
+        )
+        .map_err(selection_message)?;
+        let dialpad = select(
+            backend,
+            HidMatcher {
+                identity: HidIdentity {
+                    vendor_id: VID,
+                    product_id: DIALPAD_PID,
+                },
+                usage_page: Some(DIALPAD_PRIMARY_PAGE),
+                usage: Some(DIALPAD_PRIMARY_USAGE),
+            },
+            Role::Dialpad,
+        )
+        .map_err(selection_message)?;
+        let (keypad, _) = open(backend, keypad, Role::Keypad)?;
+        let (dialpad, _) = open(backend, dialpad, Role::Dialpad)?;
+        Ok(Self { keypad, dialpad })
+    }
+
+    pub(crate) fn read(
+        &mut self,
+        role: Role,
+        timeout: Duration,
+    ) -> std::result::Result<Vec<u8>, HidError> {
+        match role {
+            Role::Keypad => self.keypad.read_report(32, timeout),
+            Role::Dialpad => self.dialpad.read_report(20, timeout),
+        }
+    }
+}
+
+fn selection_message(error: SelectionError) -> String {
+    match error {
+        SelectionError::Message(message) => message,
+        SelectionError::Mismatch(_) => "MX Creative report descriptor mismatch".into(),
+    }
+}
+
 impl ClockedHid<'_> {
     fn new(keypad: HidDevice, dialpad: HidDevice) -> Self {
         Self {

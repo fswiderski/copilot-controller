@@ -109,6 +109,7 @@ fn filtered_open_requires_exact_unique_bounded_input_frames() {
     ] {
         assert!(HidDevice::open_filtered(&b, &d, reports).is_err());
     }
+
     let mut device = HidDevice::open_filtered(&b, &d, &[(17, 20), (19, 32)]).unwrap();
     assert_eq!(
         device.write_report(&[1, 2]),
@@ -119,6 +120,27 @@ fn filtered_open_requires_exact_unique_bounded_input_frames() {
         Err(HidError::Timeout)
     );
     assert!(b.state.borrow().written.is_empty());
+}
+
+#[test]
+fn mx_creative_review_backend_structurally_rejects_write_access() {
+    let descriptor = desc(ID, 0xff00, "a");
+    let inner = FakeBackend::new(vec![descriptor.clone()]);
+    let state = inner.state.clone();
+    let backend = review_readonly_backend(Box::new(inner));
+
+    assert!(matches!(
+        backend.open(&descriptor),
+        Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite))
+    ));
+    let mut transport = backend.open_filtered(&descriptor, &[(17, 20)]).unwrap();
+    assert!(!transport.supports_write());
+    assert_eq!(
+        transport.write(&[17, 0]),
+        Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite))
+    );
+    assert!(state.borrow().written.is_empty());
+    assert_eq!(state.borrow().open_calls, 1);
 }
 
 #[test]

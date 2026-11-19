@@ -319,6 +319,7 @@ fn isolated(test: &str) {
 #[test]
 fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
     assert!(hid_worker_capability().is_none());
+    assert!(review_hid_worker_capability().is_none());
     assert!(ct_worker_capability().is_none());
     assert!(worker_health().is_err());
     for (route, allowlist) in [
@@ -340,6 +341,12 @@ fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
             .unwrap_err();
         assert_eq!(error.kind, Kind::Containment);
     }
+    let review = super::super::maybe_run_mx_creative_review_worker([
+        super::super::MX_CREATIVE_REVIEW_HIDDEN_WORKER_ARGUMENT,
+    ])
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(review.kind, Kind::Containment);
 
     #[cfg(any(feature = "micro-hid", feature = "akp03-hid"))]
     assert!(matches!(
@@ -357,6 +364,99 @@ fn macos_mx_creative_request_gets_live_read_authority_without_health_field() {
         payload: serde_json::json!({"capture_ms":0}),
     };
     assert_eq!(request_authority(&request), Ok(ScopeAuthority::HidLive));
+    assert_eq!(
+        request_authority(&DiagnosticRequest {
+            kind: "mx_creative_review".into(),
+            payload: Value::Null,
+        }),
+        Err(Kind::InvalidRequest)
+    );
+}
+
+#[test]
+fn review_ipc_is_strict_bounded_and_action_only() {
+    let nonce = Uuid::new_v4();
+    let frame = encode_live(&LiveMessage {
+        version: LIVE_VERSION,
+        nonce,
+        kind: LiveMessageKind::Action,
+        action: Some(crate::devices::mx_creative::review_input::Action::NextFrame),
+    })
+    .unwrap();
+    let mut frames = LiveFrameBuffer::default();
+    frames.push(&frame[..2]).unwrap();
+    assert!(frames.pop().unwrap().is_none());
+    frames.push(&frame[2..]).unwrap();
+    assert!(frames.pop().unwrap().is_some());
+    assert!(frames.empty());
+
+    let mut duplicate = br#"{"version":1,"nonce":""#.to_vec();
+    duplicate.extend_from_slice(b",\"nonce\":\"\"}");
+    assert!(protocol::decode_frame_body::<LiveRequest>(&duplicate).is_err());
+    let oversized = vec![b'x'; MAX_LIVE_FRAME + 1];
+    assert_eq!(frames.push(&oversized), Ok(()));
+    assert!(matches!(frames.pop(), Err(Kind::FrameLimit)));
+    let unknown = protocol::encode_frame(&json!({
+        "version": LIVE_VERSION,
+        "nonce": nonce,
+        "kind": "action",
+        "action": "next_frame",
+        "command": "write"
+    }))
+    .unwrap();
+    let mut invalid = LiveFrameBuffer::default();
+    invalid.push(&unknown).unwrap();
+    assert!(invalid.pop().is_err());
+}
+
+struct Blocked;
+
+impl Write for Blocked {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let _ = bytes;
+        Err(io::ErrorKind::WouldBlock.into())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn review_parent_output_has_one_bounded_pending_line() {
+    let now = Instant::now();
+    let mut output = OutputGate::new();
+    output
+        .enqueue(
+            crate::devices::mx_creative::review_input::Action::TogglePlay,
+            now,
+        )
+        .unwrap();
+    assert!(
+        output
+            .enqueue(
+                crate::devices::mx_creative::review_input::Action::Screenshot,
+                now
+            )
+            .is_err()
+    );
+    output.flush(&mut Blocked, now).unwrap();
+    assert!(
+        output
+            .flush(&mut Blocked, now + LIVE_WRITE + Duration::from_millis(1))
+            .is_err()
+    );
+}
+
+#[test]
+fn review_lifecycle_rejects_parent_data_and_accepts_eof() {
+    assert_eq!(accept_parent_input(Ok(0)), Ok(false));
+    assert_eq!(accept_parent_input(Ok(1)), Err(Kind::Protocol));
+    assert_eq!(accept_parent_input(Ok(65_536)), Err(Kind::Protocol));
+    assert_eq!(
+        accept_parent_input(Err(io::ErrorKind::WouldBlock.into())),
+        Ok(true)
+    );
 }
 
 #[test]

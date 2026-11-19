@@ -4,6 +4,7 @@
 mod ct_probe;
 mod hid_probe;
 mod mx_creative_evidence;
+mod review_input;
 
 use std::{
     io::Read,
@@ -62,6 +63,7 @@ Usage: copilot-controller <command>
            [--max-events <1..128>] [--max-received-bytes <256..32768>]
            [--test-pattern] (explicit contained serial diagnostic)
   mx-creative-evidence [--capture-ms <0..30000>] (finite read-only HID evidence)
+  review-input --device mx-creative (private foreground action stream)
 
 All previews and probes are not ready or hardware-qualified. Native probes use
 contained Windows workers or macOS ARM64 workers.
@@ -117,6 +119,7 @@ pub enum Command {
     MicroProbe(micro::probe::MicroProbeOptions),
     Akp03Probe(akp03::probe::Akp03ProbeOptions),
     MxCreativeEvidence(mx_creative::probe::Options),
+    ReviewInput,
     FirmwarePlan {
         image: PathBuf,
         tool: PathBuf,
@@ -273,6 +276,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "mx-creative-evidence" => {
             return mx_creative_evidence::parse(args).map(Command::MxCreativeEvidence);
         }
+        "review-input" => return review_input::parse(args).map(|()| Command::ReviewInput),
         "micro-probe" | "akp03-probe" => {
             return hid_probe::parse(args, name == "micro-probe").map(|options| match options {
                 hid_probe::Options::Micro(options) => Command::MicroProbe(options),
@@ -582,6 +586,7 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
         Command::MicroProbe(options) => hid_probe::execute(hid_probe::Options::Micro(options)),
         Command::Akp03Probe(options) => hid_probe::execute(hid_probe::Options::Akp03(options)),
         Command::MxCreativeEvidence(options) => mx_creative_evidence::execute(options),
+        Command::ReviewInput => Err("review-input requires the streaming CLI route".into()),
         Command::FirmwarePlan { image, tool } => {
             if !cfg!(feature = "micro-firmware") {
                 return Err(
@@ -596,6 +601,17 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
         }
         Command::Unavailable(backend) => Err(format!("unavailable: {backend} is not integrated")),
     }
+}
+
+pub fn execute_review_input() -> Result<(), String> {
+    if !cfg!(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        feature = "mx-creative-hid"
+    )) {
+        return Err("review-input requires the mx-creative-hid feature on macOS ARM64".into());
+    }
+    worker::supervise_mx_creative_review().map_err(|error| error.to_string())
 }
 
 static HEALTH_CALLBACKS: [worker::DiagnosticCallback; 1] =

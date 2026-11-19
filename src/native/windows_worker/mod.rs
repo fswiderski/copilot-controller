@@ -52,6 +52,12 @@ pub(crate) use macos::CtWorkerCapability;
 pub(crate) use macos::ct_probe_containment;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use macos::ct_worker_capability;
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "mx-creative-hid"
+))]
+pub(crate) use macos::review_hid_worker_capability;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use macos::worker_health;
 #[cfg(all(
@@ -73,6 +79,47 @@ pub const HIDDEN_WORKER_ARGUMENT: &str = "__probe-worker";
 /// AKP03 uses the same supervisor with a separate kind-only hidden registry.
 pub const AKP03_HIDDEN_WORKER_ARGUMENT: &str = "__akp03-worker";
 pub const MX_CREATIVE_HIDDEN_WORKER_ARGUMENT: &str = "__mx-creative-worker";
+/// Private streaming route; never a normal diagnostic request or public scope.
+pub const MX_CREATIVE_REVIEW_HIDDEN_WORKER_ARGUMENT: &str = "__mx-creative-review-worker";
+
+pub fn supervise_mx_creative_review() -> Result<(), WorkerError> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        macos::supervise_mx_creative_review()
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        Err(WorkerError::before_launch(
+            WorkerErrorKind::UnsupportedPlatform,
+        ))
+    }
+}
+
+pub fn maybe_run_mx_creative_review_worker<I, S>(arguments: I) -> Option<Result<(), WorkerError>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut arguments = arguments.into_iter();
+    if arguments.next()?.as_ref() != OsStr::new(MX_CREATIVE_REVIEW_HIDDEN_WORKER_ARGUMENT) {
+        return None;
+    }
+    if arguments.next().is_some() {
+        return Some(Err(WorkerError::before_launch(
+            WorkerErrorKind::InvalidRequest,
+        )));
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        Some(macos::mx_creative_review_worker_main())
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        Some(Err(WorkerError::before_launch(
+            WorkerErrorKind::UnsupportedPlatform,
+        )))
+    }
+}
 
 /// Fixed same-executable routes, never arbitrary command-line arguments.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

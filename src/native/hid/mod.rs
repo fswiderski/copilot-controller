@@ -548,6 +548,145 @@ pub fn native_backend() -> Result<Box<dyn HidBackend>, HidError> {
     }
 }
 
+/// Backend constructor admitted only by the dedicated MX Creative review scope.
+pub(crate) fn mx_creative_review_backend() -> Result<Box<dyn HidBackend>, HidError> {
+    #[cfg(all(
+        feature = "mx-creative-hid",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    {
+        Ok(review_readonly_backend(Box::new(
+            iokit::IoKitHid::new_for_mx_creative_review()?,
+        )))
+    }
+    #[cfg(not(feature = "mx-creative-hid"))]
+    {
+        Err(HidError::Unavailable(UnavailableReason::FeatureDisabled))
+    }
+    #[cfg(all(
+        feature = "mx-creative-hid",
+        not(all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    {
+        Err(HidError::Unavailable(
+            UnavailableReason::UnsupportedPlatform,
+        ))
+    }
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "mx-creative-hid",
+        target_os = "macos",
+        target_arch = "aarch64"
+    )
+))]
+fn review_readonly_backend(inner: Box<dyn HidBackend>) -> Box<dyn HidBackend> {
+    Box::new(ReviewReadOnlyBackend { inner })
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "mx-creative-hid",
+        target_os = "macos",
+        target_arch = "aarch64"
+    )
+))]
+struct ReviewReadOnlyBackend {
+    inner: Box<dyn HidBackend>,
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "mx-creative-hid",
+        target_os = "macos",
+        target_arch = "aarch64"
+    )
+))]
+impl HidBackend for ReviewReadOnlyBackend {
+    fn enumerate(
+        &self,
+        matcher: &HidMatcher,
+        limit: usize,
+    ) -> Result<Vec<HidDescriptor>, HidError> {
+        self.inner.enumerate(matcher, limit)
+    }
+
+    fn open(&self, _descriptor: &HidDescriptor) -> Result<Box<dyn HidTransport>, HidError> {
+        Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite))
+    }
+
+    fn open_filtered(
+        &self,
+        descriptor: &HidDescriptor,
+        reports: &[(u8, usize)],
+    ) -> Result<Box<dyn HidTransport>, HidError> {
+        Ok(Box::new(ReviewReadOnlyTransport {
+            inner: self.inner.open_filtered(descriptor, reports)?,
+        }))
+    }
+
+    fn open_allowing_usage_change(
+        &self,
+        _descriptor: &HidDescriptor,
+    ) -> Result<Box<dyn HidTransport>, HidError> {
+        Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite))
+    }
+
+    fn original_report_descriptor(&self, descriptor: &HidDescriptor) -> Result<Vec<u8>, HidError> {
+        self.inner.original_report_descriptor(descriptor)
+    }
+
+    fn original_report_descriptor_evidence(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> Result<ReportDescriptorEvidence, HidError> {
+        self.inner.original_report_descriptor_evidence(descriptor)
+    }
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "mx-creative-hid",
+        target_os = "macos",
+        target_arch = "aarch64"
+    )
+))]
+struct ReviewReadOnlyTransport {
+    inner: Box<dyn HidTransport>,
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "mx-creative-hid",
+        target_os = "macos",
+        target_arch = "aarch64"
+    )
+))]
+impl HidTransport for ReviewReadOnlyTransport {
+    fn supports_write(&self) -> bool {
+        false
+    }
+
+    fn write(&mut self, _report: &[u8]) -> Result<usize, HidError> {
+        Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite))
+    }
+
+    fn read(&mut self, buffer: &mut [u8], timeout: Duration) -> Result<usize, HidError> {
+        self.inner.read(buffer, timeout)
+    }
+
+    fn report_descriptor(&mut self) -> Result<Vec<u8>, HidError> {
+        self.inner.report_descriptor()
+    }
+}
+
 #[cfg(all(
     any(
         feature = "akp03-hid",

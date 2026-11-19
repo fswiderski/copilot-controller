@@ -129,8 +129,15 @@ pub(super) fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>, WorkerErr
     if body_len == 0 || body_len > MAX_FRAME_BODY_BYTES {
         return Err(WorkerErrorKind::FrameLimit);
     }
+
     frame.bytes[..4].copy_from_slice(&(body_len as u32).to_le_bytes());
     Ok(frame.bytes)
+}
+
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
+pub(super) fn decode_frame_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, WorkerErrorKind> {
+    serde_json::from_slice::<UniqueKeys>(body).map_err(|_| WorkerErrorKind::Protocol)?;
+    serde_json::from_slice(body).map_err(|_| WorkerErrorKind::Protocol)
 }
 
 #[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
@@ -192,8 +199,7 @@ pub(super) fn read_frame<R: Read, T: DeserializeOwned>(
     }
     // Value discards duplicate object keys. Reject them while the framed bytes
     // still exist, before typed callback validation can authorize device I/O.
-    serde_json::from_slice::<UniqueKeys>(&body).map_err(|_| WorkerErrorKind::Protocol)?;
-    serde_json::from_slice(&body).map_err(|_| WorkerErrorKind::Protocol)
+    decode_frame_body(&body)
 }
 
 #[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]

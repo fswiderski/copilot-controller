@@ -137,7 +137,8 @@ facts are limited to:
 
 - keypad buttons 1–9: press transitions on report ID 19, distinguished at
   `values[5]`; release transition is `0`;
-- dialpad clockwise: report ID 2 final payload byte interpreted as signed `i8`
+- dialpad clockwise: report ID 2 final Consumer AC Pan byte at report index 7,
+  interpreted as signed `i8` (the nominal wheel byte at index 6 remains zero)
   yielded positive movement 1–13;
 - dialpad counter-clockwise: the same byte yielded negative movement encoded
   as unsigned bytes 255–245;
