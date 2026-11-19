@@ -150,11 +150,13 @@ struct ClockedHid<'a> {
     _borrow: std::marker::PhantomData<&'a ()>,
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) struct LiveDevices {
     keypad: HidDevice,
     dialpad: HidDevice,
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 impl LiveDevices {
     pub(crate) fn open(backend: &dyn HidBackend) -> std::result::Result<Self, String> {
         let keypad = select(
@@ -200,6 +202,7 @@ impl LiveDevices {
     }
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn selection_message(error: SelectionError) -> String {
     match error {
         SelectionError::Message(message) => message,

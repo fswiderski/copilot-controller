@@ -549,6 +549,7 @@ pub fn native_backend() -> Result<Box<dyn HidBackend>, HidError> {
 }
 
 /// Backend constructor admitted only by the dedicated MX Creative review scope.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) fn mx_creative_review_backend() -> Result<Box<dyn HidBackend>, HidError> {
     #[cfg(all(
         feature = "mx-creative-hid",
