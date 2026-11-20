@@ -4,27 +4,28 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::native::hid::{
-    HidBackend, HidBus, HidDescriptor, HidDevice, HidError, HidIdentity, HidMatcher, enumerate,
+    HidBackend, HidBus, HidDescriptor, HidDevice, HidError, HidIdentity, HidMatcher,
+    MxCreativeDisplayInfoBackend, enumerate,
 };
 
-const VID: u16 = 0x046d;
-const KEYPAD_PID: u16 = 0xc354;
+pub(super) const VID: u16 = 0x046d;
+pub(super) const KEYPAD_PID: u16 = 0xc354;
 const DIALPAD_PID: u16 = 0xbc00;
-const VENDOR_PAGE: u16 = 0xff43;
-const KEYPAD_USAGE: u16 = 0x1a02;
+pub(super) const VENDOR_PAGE: u16 = 0xff43;
+pub(super) const KEYPAD_USAGE: u16 = 0x1a02;
 const DIALPAD_PRIMARY_PAGE: u16 = 0x0001;
 const DIALPAD_PRIMARY_USAGE: u16 = 0x0002;
 const GENERIC_DESKTOP_PAGE: u16 = 0x0001;
 const SYSTEM_CONTROL_USAGE: u16 = 0x0080;
 const CONSUMER_PAGE: u16 = 0x000c;
 const CONSUMER_CONTROL_USAGE: u16 = 0x0001;
-const KEYPAD_LOCATION_ID: u32 = 0x0211_0000;
+pub(super) const KEYPAD_LOCATION_ID: u32 = 0x0211_0000;
 const CAPTURE_LIMIT: usize = 64;
 const READ_SLICE: Duration = Duration::from_millis(50);
 
-const KEYPAD_DESCRIPTOR_HEX: &str = "0643ff0a021aa101851195137508150026ff000902810009029100c00643ff0a081aa1018513961f007508150026ff0009088202010908920201c00643ff0a101aa101851496fe0f7508150026ff000910920201c005010980a10185049501750215012503098209810983810075068103c0050c0901a101850595017501150025010a2402810295078103c0";
+pub(super) const KEYPAD_DESCRIPTOR_HEX: &str = "0643ff0a021aa101851195137508150026ff000902810009029100c00643ff0a081aa1018513961f007508150026ff0009088202010908920201c00643ff0a101aa101851496fe0f7508150026ff000910920201c005010980a10185049501750215012503098209810983810075068103c0050c0901a101850595017501150025010a2402810295078103c0";
 const DIALPAD_DESCRIPTOR_HEX: &str = "05010902a10185020901a1009510750115002501050919012910810295020501a4750c1600f826ff07093009318106b4950175081580257f09388106050c0a38028106c0c00643ff0a0202a101851195137508150026ff000902810009029100c0";
-const KEYPAD_DESCRIPTOR_SHA256: &str =
+pub(super) const KEYPAD_DESCRIPTOR_SHA256: &str =
     "d6faec8e21db00518c67b4446875b6bdb9d85988d05d888641da069fb302bc54";
 const DIALPAD_DESCRIPTOR_SHA256: &str =
     "49ea87e24b5049ea9e7e01dd750754aad63f37f51ce8191fee1c1ff7ae5d2cac";
@@ -208,6 +209,42 @@ fn selection_message(error: SelectionError) -> String {
         SelectionError::Message(message) => message,
         SelectionError::Mismatch(_) => "MX Creative report descriptor mismatch".into(),
     }
+}
+
+pub(super) fn select_display_keypad(
+    backend: &MxCreativeDisplayInfoBackend,
+) -> std::result::Result<HidDescriptor, String> {
+    let matcher = HidMatcher {
+        identity: HidIdentity {
+            vendor_id: VID,
+            product_id: KEYPAD_PID,
+        },
+        usage_page: Some(VENDOR_PAGE),
+        usage: Some(KEYPAD_USAGE),
+    };
+    let found = backend
+        .enumerate(&matcher, 2)
+        .map_err(|error| error.to_string())?;
+    if found.len() != 1 {
+        return Err(format!(
+            "keypad requires exactly one collection; found {}",
+            found.len()
+        ));
+    }
+    let descriptor = found
+        .into_iter()
+        .next()
+        .ok_or_else(|| "missing collection".to_owned())?;
+    let raw = backend
+        .original_report_descriptor_evidence(&descriptor)
+        .map_err(|error| error.to_string())?;
+    verify_identity(&descriptor, Role::Keypad)?;
+    if raw.source_path != descriptor.path.as_str()
+        || verify_descriptor_bytes(&raw.bytes, Role::Keypad).is_err()
+    {
+        return Err("keypad report descriptor mismatch".into());
+    }
+    Ok(descriptor)
 }
 
 impl ClockedHid<'_> {

@@ -144,6 +144,163 @@ fn mx_creative_review_backend_structurally_rejects_write_access() {
 }
 
 #[test]
+fn mx_display_queries_are_exact_typed_get_frames() {
+    let descriptor = HidDescriptor {
+        identity: HidIdentity {
+            vendor_id: 0x046d,
+            product_id: 0xc354,
+        },
+        usage_page: 0xff43,
+        usage: 0x1a02,
+        product: Some("MX Creative Keypad".into()),
+        serial: Some("must never be returned".into()),
+        max_input_report_len: 32,
+        max_output_report_len: 4095,
+        interface_number: None,
+        bus: Some(HidBus::Usb),
+        location_id: Some(0x0211_0000),
+        path: HidPath::new("iokit:1").unwrap(),
+    };
+    let backend = FakeBackend::new(vec![descriptor.clone()]);
+    let mut unrelated = [0; 20];
+    unrelated[..4].copy_from_slice(&[0x11, 0xff, 0, 0x0e]);
+    let mut root = [0; 20];
+    root[..5].copy_from_slice(&[0x11, 0xff, 0, 0x01, 0x0a]);
+    let mut keepalive = [0; 20];
+    keepalive[..8].copy_from_slice(&[0x11, 0xff, 0x0a, 0x02, 0x01, 0xf4, 0x27, 0x10]);
+    backend.state.borrow_mut().inputs.extend([
+        unrelated.to_vec(),
+        root.to_vec(),
+        keepalive.to_vec(),
+    ]);
+
+    let mut device =
+        MxCreativeDisplayInfoDevice::open(&backend, &descriptor).expect("query device");
+    assert_eq!(
+        device.query(
+            MxCreativeDisplayQuery::Discover(MxCreativeDisplayFeature::Brightness),
+            Duration::from_secs(1)
+        ),
+        Ok(MxCreativeDisplayReply::FeatureIndex(0x0a))
+    );
+    assert_eq!(
+        device.query(
+            MxCreativeDisplayQuery::KeepAliveRange {
+                feature_index: 0x0a
+            },
+            Duration::from_secs(1)
+        ),
+        Ok(MxCreativeDisplayReply::KeepAliveRange {
+            minimum_ms: 500,
+            maximum_ms: 10_000
+        })
+    );
+    let writes = backend.state.borrow().written.clone();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes[0], display_query_frame(0, 0, 1, [0x80, 0x40]));
+    assert_eq!(writes[1], display_query_frame(0x0a, 0, 2, [0, 0]));
+    assert!(
+        writes
+            .iter()
+            .all(|frame| frame.len() == 20 && frame[0] == 0x11)
+    );
+}
+
+#[test]
+fn mx_display_query_rejects_uncorrelated_and_unsupported_writes() {
+    let descriptor = desc(ID, 0xff00, "query");
+    let backend = FakeBackend::new(vec![descriptor.clone()]);
+    let mut wrong_function = [0; 20];
+    wrong_function[..5].copy_from_slice(&[0x11, 0xff, 0, 0x11, 9]);
+    backend
+        .state
+        .borrow_mut()
+        .inputs
+        .push_back(wrong_function.to_vec());
+    let mut device = MxCreativeDisplayInfoDevice::open(&backend, &descriptor).unwrap();
+    assert!(matches!(
+        device.query(
+            MxCreativeDisplayQuery::Discover(MxCreativeDisplayFeature::Display),
+            Duration::from_millis(10)
+        ),
+        Err(HidError::Protocol(
+            "uncorrelated MX display response function"
+        ))
+    ));
+    backend.state.borrow_mut().writes_unsupported = true;
+    assert!(matches!(
+        MxCreativeDisplayInfoDevice::open(&backend, &descriptor),
+        Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite))
+    ));
+    assert_eq!(backend.state.borrow().written.len(), 1);
+}
+
+#[test]
+fn mx_display_query_accepts_correlated_hidpp_errors_without_echoing_payload() {
+    let descriptor = desc(ID, 0xff00, "query-error");
+    let backend = FakeBackend::new(vec![descriptor.clone()]);
+    let mut error = [0; 20];
+    error[..6].copy_from_slice(&[0x11, 0xff, 0xff, 0x00, 0x01, 0x09]);
+    backend.state.borrow_mut().inputs.push_back(error.to_vec());
+    let mut device = MxCreativeDisplayInfoDevice::open(&backend, &descriptor).unwrap();
+    assert_eq!(
+        device.query(
+            MxCreativeDisplayQuery::Discover(MxCreativeDisplayFeature::Controls),
+            Duration::from_secs(1)
+        ),
+        Ok(MxCreativeDisplayReply::HidppError(0x09))
+    );
+    assert_eq!(
+        device.query(
+            MxCreativeDisplayQuery::Discover(MxCreativeDisplayFeature::Controls),
+            Duration::ZERO
+        ),
+        Err(HidError::InvalidArgument(ArgumentError::TimeoutTooLarge))
+    );
+    assert_eq!(backend.state.borrow().written.len(), 1);
+}
+
+#[test]
+fn mx_display_query_rejects_wrong_hidpp_error_echo_and_ignores_other_swids() {
+    let descriptor = desc(ID, 0xff00, "query-error-correlation");
+    let backend = FakeBackend::new(vec![descriptor.clone()]);
+    let mut other = [0; 20];
+    other[..6].copy_from_slice(&[0x11, 0xff, 0xff, 0x00, 0x0e, 0x09]);
+    let mut valid = [0; 20];
+    valid[..6].copy_from_slice(&[0x11, 0xff, 0xff, 0x00, 0x01, 0x06]);
+    backend
+        .state
+        .borrow_mut()
+        .inputs
+        .extend([other.to_vec(), valid.to_vec()]);
+    let mut device = MxCreativeDisplayInfoDevice::open(&backend, &descriptor).unwrap();
+    assert_eq!(
+        device.query(
+            MxCreativeDisplayQuery::Discover(MxCreativeDisplayFeature::Brightness),
+            Duration::from_secs(1)
+        ),
+        Ok(MxCreativeDisplayReply::HidppError(0x06))
+    );
+
+    let mut wrong_feature = [0; 20];
+    wrong_feature[..6].copy_from_slice(&[0x11, 0xff, 0xff, 0x01, 0x02, 0x09]);
+    backend
+        .state
+        .borrow_mut()
+        .inputs
+        .push_back(wrong_feature.to_vec());
+    assert!(matches!(
+        device.query(
+            MxCreativeDisplayQuery::Discover(MxCreativeDisplayFeature::Display),
+            Duration::from_secs(1)
+        ),
+        Err(HidError::Protocol(
+            "uncorrelated MX display HID++ error function"
+        ))
+    ));
+}
+
+#[test]
 fn write_bounds() {
     let d = desc(ID, 1, "a");
     let b = FakeBackend::new(vec![d.clone()]);

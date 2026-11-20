@@ -57,6 +57,12 @@ pub(crate) use macos::ct_worker_capability;
     target_arch = "aarch64",
     feature = "mx-creative-hid"
 ))]
+pub(crate) use macos::display_info_hid_worker_capability;
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "mx-creative-hid"
+))]
 pub(crate) use macos::review_hid_worker_capability;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use macos::worker_health;
@@ -79,6 +85,8 @@ pub const HIDDEN_WORKER_ARGUMENT: &str = "__probe-worker";
 /// AKP03 uses the same supervisor with a separate kind-only hidden registry.
 pub const AKP03_HIDDEN_WORKER_ARGUMENT: &str = "__akp03-worker";
 pub const MX_CREATIVE_HIDDEN_WORKER_ARGUMENT: &str = "__mx-creative-worker";
+pub const MX_CREATIVE_DISPLAY_INFO_HIDDEN_WORKER_ARGUMENT: &str =
+    "__mx-creative-display-info-worker";
 /// Private streaming route; never a normal diagnostic request or public scope.
 pub const MX_CREATIVE_REVIEW_HIDDEN_WORKER_ARGUMENT: &str = "__mx-creative-review-worker";
 
@@ -127,6 +135,7 @@ pub enum DiagnosticWorkerRoute {
     Shared,
     Akp03,
     MxCreative,
+    MxCreativeDisplayInfo,
 }
 
 impl DiagnosticWorkerRoute {
@@ -135,6 +144,7 @@ impl DiagnosticWorkerRoute {
             Self::Shared => HIDDEN_WORKER_ARGUMENT,
             Self::Akp03 => AKP03_HIDDEN_WORKER_ARGUMENT,
             Self::MxCreative => MX_CREATIVE_HIDDEN_WORKER_ARGUMENT,
+            Self::MxCreativeDisplayInfo => MX_CREATIVE_DISPLAY_INFO_HIDDEN_WORKER_ARGUMENT,
         }
     }
 }

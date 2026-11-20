@@ -316,6 +316,225 @@ pub struct ExclusiveOpenProbe {
     pub close_code: Option<i64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MxCreativeDisplayFeature {
+    KeepAlive,
+    Brightness,
+    Display,
+    Controls,
+}
+
+impl MxCreativeDisplayFeature {
+    pub(crate) const fn id(self) -> u16 {
+        match self {
+            Self::KeepAlive => 0x0008,
+            Self::Brightness => 0x8040,
+            Self::Display => 0x19a1,
+            Self::Controls => 0x1b04,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MxCreativeDisplayQuery {
+    Discover(MxCreativeDisplayFeature),
+    KeepAliveRange { feature_index: u8 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MxCreativeDisplayReply {
+    FeatureIndex(u8),
+    KeepAliveRange { minimum_ms: u16, maximum_ms: u16 },
+    HidppError(u8),
+}
+
+pub(crate) struct MxCreativeDisplayInfoBackend {
+    inner: Box<dyn HidBackend>,
+}
+
+impl MxCreativeDisplayInfoBackend {
+    pub(crate) fn enumerate(
+        &self,
+        matcher: &HidMatcher,
+        limit: usize,
+    ) -> Result<Vec<HidDescriptor>, HidError> {
+        enumerate(self.inner.as_ref(), matcher, limit)
+    }
+
+    pub(crate) fn original_report_descriptor_evidence(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> Result<ReportDescriptorEvidence, HidError> {
+        self.inner.original_report_descriptor_evidence(descriptor)
+    }
+
+    pub(crate) fn open(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> Result<MxCreativeDisplayInfoDevice, HidError> {
+        MxCreativeDisplayInfoDevice::open(self.inner.as_ref(), descriptor)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_backend(inner: Box<dyn HidBackend>) -> Self {
+        Self { inner }
+    }
+}
+
+pub(crate) struct MxCreativeDisplayInfoDevice {
+    transport: Box<dyn HidTransport>,
+    next_software_id: u8,
+    requests_sent: u8,
+}
+
+impl MxCreativeDisplayInfoDevice {
+    const REPORT_ID: u8 = 0x11;
+    const REPORT_LEN: usize = 20;
+    const DEVICE_INDEX: u8 = 0xff;
+
+    pub(crate) fn open(
+        backend: &dyn HidBackend,
+        descriptor: &HidDescriptor,
+    ) -> Result<Self, HidError> {
+        validate_read_descriptor(descriptor)?;
+        if descriptor.max_output_report_len < Self::REPORT_LEN {
+            return Err(HidError::InvalidArgument(
+                ArgumentError::ReportExceedsDevice,
+            ));
+        }
+        let transport =
+            backend.open_filtered(descriptor, &[(Self::REPORT_ID, Self::REPORT_LEN)])?;
+        if !transport.supports_write() {
+            return Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite));
+        }
+        Ok(Self {
+            transport,
+            next_software_id: 1,
+            requests_sent: 0,
+        })
+    }
+
+    pub(crate) const fn requests_sent(&self) -> u8 {
+        self.requests_sent
+    }
+
+    pub(crate) fn report_descriptor(&mut self) -> Result<Vec<u8>, HidError> {
+        self.transport.report_descriptor()
+    }
+
+    pub(crate) fn query(
+        &mut self,
+        query: MxCreativeDisplayQuery,
+        timeout: Duration,
+    ) -> Result<MxCreativeDisplayReply, HidError> {
+        if timeout.is_zero() || timeout > Duration::from_secs(2) {
+            return Err(HidError::InvalidArgument(ArgumentError::TimeoutTooLarge));
+        }
+        let software_id = self.next_software_id;
+        self.next_software_id = self
+            .next_software_id
+            .checked_add(1)
+            .filter(|next| *next <= 0x0f)
+            .ok_or(HidError::Protocol(
+                "MX display query software IDs exhausted",
+            ))?;
+        let (feature_index, function, parameters) = match query {
+            MxCreativeDisplayQuery::Discover(feature) => (
+                0,
+                0,
+                [
+                    u8::try_from(feature.id() >> 8).expect("16-bit shift"),
+                    feature.id() as u8,
+                ],
+            ),
+            MxCreativeDisplayQuery::KeepAliveRange { feature_index }
+                if (1..=0xfe).contains(&feature_index) =>
+            {
+                (feature_index, 0, [0, 0])
+            }
+            MxCreativeDisplayQuery::KeepAliveRange { .. } => {
+                return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
+            }
+        };
+        let frame = display_query_frame(feature_index, function, software_id, parameters);
+        if self.transport.write(&frame)? != frame.len() {
+            return Err(HidError::Protocol(
+                "MX display query report was not fully written",
+            ));
+        }
+        self.requests_sent = self.requests_sent.checked_add(1).ok_or(HidError::Protocol(
+            "MX display query request count exhausted",
+        ))?;
+
+        let deadline = std::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or(HidError::InvalidArgument(ArgumentError::TimeoutTooLarge))?;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(HidError::Timeout);
+            }
+            let mut buffer = [0; Self::REPORT_LEN];
+            let count = self.transport.read(&mut buffer, remaining)?;
+            if count != Self::REPORT_LEN || buffer[0] != Self::REPORT_ID {
+                return Err(HidError::Protocol("unexpected MX display response framing"));
+            }
+            if buffer[1] != Self::DEVICE_INDEX {
+                return Err(HidError::Protocol("unexpected MX display response device"));
+            }
+            if buffer[2] == 0xff {
+                if buffer[4] & 0x0f != software_id {
+                    continue;
+                }
+                if buffer[3] != feature_index || buffer[4] >> 4 != function {
+                    return Err(HidError::Protocol(
+                        "uncorrelated MX display HID++ error function",
+                    ));
+                }
+                return Ok(MxCreativeDisplayReply::HidppError(buffer[5]));
+            }
+            if buffer[3] & 0x0f != software_id {
+                continue;
+            }
+            if buffer[2] != feature_index || buffer[3] >> 4 != function {
+                return Err(HidError::Protocol(
+                    "uncorrelated MX display response function",
+                ));
+            }
+            return match query {
+                MxCreativeDisplayQuery::Discover(_) => {
+                    Ok(MxCreativeDisplayReply::FeatureIndex(buffer[4]))
+                }
+                MxCreativeDisplayQuery::KeepAliveRange { .. } => {
+                    let bytes = &buffer[4..8];
+                    Ok(MxCreativeDisplayReply::KeepAliveRange {
+                        minimum_ms: u16::from_be_bytes([bytes[0], bytes[1]]),
+                        maximum_ms: u16::from_be_bytes([bytes[2], bytes[3]]),
+                    })
+                }
+            };
+        }
+    }
+}
+
+fn display_query_frame(
+    feature_index: u8,
+    function: u8,
+    software_id: u8,
+    parameters: [u8; 2],
+) -> [u8; MxCreativeDisplayInfoDevice::REPORT_LEN] {
+    debug_assert!(function <= 0x0f);
+    debug_assert!((1..=0x0f).contains(&software_id));
+    let mut frame = [0; MxCreativeDisplayInfoDevice::REPORT_LEN];
+    frame[0] = MxCreativeDisplayInfoDevice::REPORT_ID;
+    frame[1] = MxCreativeDisplayInfoDevice::DEVICE_INDEX;
+    frame[2] = feature_index;
+    frame[3] = (function << 4) | software_id;
+    frame[4] = parameters[0];
+    frame[5] = parameters[1];
+    frame
+}
+
 /// Raw report I/O. Implementations may assume arguments were bounds-checked by
 /// [`HidDevice`], the only way callers reach them.
 pub trait HidTransport {
@@ -560,6 +779,35 @@ pub(crate) fn mx_creative_review_backend() -> Result<Box<dyn HidBackend>, HidErr
         Ok(review_readonly_backend(Box::new(
             iokit::IoKitHid::new_for_mx_creative_review()?,
         )))
+    }
+    #[cfg(not(feature = "mx-creative-hid"))]
+    {
+        Err(HidError::Unavailable(UnavailableReason::FeatureDisabled))
+    }
+    #[cfg(all(
+        feature = "mx-creative-hid",
+        not(all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    {
+        Err(HidError::Unavailable(
+            UnavailableReason::UnsupportedPlatform,
+        ))
+    }
+}
+
+/// Backend constructor admitted only by the dedicated MX Creative display-info
+/// authority. The transport remains hidden behind
+/// [`MxCreativeDisplayInfoDevice`]'s typed query enum.
+pub(crate) fn mx_creative_display_info_backend() -> Result<MxCreativeDisplayInfoBackend, HidError> {
+    #[cfg(all(
+        feature = "mx-creative-hid",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    {
+        Ok(MxCreativeDisplayInfoBackend {
+            inner: Box::new(iokit::IoKitHid::new_for_mx_creative_display_info()?),
+        })
     }
     #[cfg(not(feature = "mx-creative-hid"))]
     {

@@ -1,7 +1,8 @@
 # MX Creative Console evidence block
 
-Status: clean-room, read-only macOS ARM64 evidence collection. This does not
-qualify the hardware, provide actions, or establish controller bindings.
+Status: clean-room, read-only macOS ARM64 evidence collection plus a
+semantically read-only HID++ display-information query. This does not qualify
+the hardware, provide actions, or establish controller bindings.
 
 ## 1. Scope and non-goals
 
@@ -151,3 +152,59 @@ All nine keypad controls are mapped only as raw evidence. Page controls and
 other standard-report semantics remain pending separate physical review. Any
 ambiguous, extra, or non-deterministic report blocks qualification. No
 controller action mapping is authorized by this block.
+
+## 6. Semantic display-information discovery
+
+`mx-creative-display-info` is a separate, finite worker route. It is available
+only on macOS ARM64 with `mx-creative-hid`, and it selects exactly the USB
+`046d:c354` `MX Creative Keypad` vendor collection at
+`0xff43/0x1a02`, LocationID `0x02110000`. The complete original report
+descriptor must match the pinned 140-byte SHA-256 value in section 2 before
+open and after open.
+
+The child authority is `MxCreativeDisplayInfo`, and its route has no action or
+streaming callbacks. It opens IOKit with nonexclusive option `0`, filters input
+to report ID `0x11` at exactly 20 normalized bytes, and exposes no arbitrary HID
+write method. Internally it can submit only the following typed GET queries,
+each on one 20-byte report `11 ff feature function/swid ...`:
+
+| Query | Feature/function | Purpose |
+|---|---|---|
+| `IRoot GetFeature` | index `0x00`, function `0` | Discover exact IDs `0x0008`, `0x8040`, `0x19a1`, and `0x1b04` |
+| KeepAlive range | discovered `0x0008` index, function `0` | Read the established minimum/maximum timeout range |
+
+Every request has a session-unique software ID. Successful replies must
+correlate on device index, report ID, exact feature index, function, and
+software ID; HID++ error replies use their correlated software ID and the
+`0xff` error feature index. Unrelated software IDs are ignored only until the
+per-request two-second deadline. There are no retries. Four discovery requests
+are sent; the fifth KeepAlive range request is sent only when discovery
+returned a nonzero index. The whole worker budget is below 30 seconds.
+
+Despite the read-only semantics, HID++ requests physically send output reports.
+This command therefore must not be described as passive capture. It never
+sends a SET, function 1 to KeepAlive, key diversion, keepalive activation,
+brightness change, LCD output, firmware request, reset, or arbitrary frame.
+In particular, brightness, display-state/geometry, and controls metadata
+functions are not queried: their feature-table presence is reported while
+their `metadata_status` remains explicitly `*_not_authorized`. These GET
+contracts require a separately corroborated protocol and authorization review.
+
+JSON output includes only device numeric identity and descriptor digest,
+feature IDs/indices/status, HID++ error codes, the KeepAlive millisecond range,
+bounded request count, and elapsed time. It does not include serials, registry
+paths, product strings, raw requests, raw replies, or other report payloads.
+Feature index zero means absent; bounded HID++ unsupported/unknown errors are
+also represented as per-feature absence rather than a failure of the entire
+discovery. Transport, correlation, framing, timeout, or descriptor failures
+remain command failures.
+
+Build and invoke after review, without touching display pixels:
+
+```sh
+cargo build --release --features mx-creative-hid
+target/release/copilot-controller mx-creative-display-info
+```
+
+This phase does not qualify the display path and provides no direct-write icon
+authority. It supplies a fail-safe feature map and KeepAlive range only.

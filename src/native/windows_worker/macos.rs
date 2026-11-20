@@ -57,6 +57,7 @@ enum ScopeAuthority {
     Health,
     HidHealth,
     HidLive,
+    MxCreativeDisplayInfo,
     MxCreativeReview,
     CtSerialProbe,
 }
@@ -132,6 +133,11 @@ pub(crate) fn hid_worker_capability() -> Option<HidWorkerCapability> {
 #[cfg(any(feature = "mx-creative-hid", test))]
 pub(crate) fn review_hid_worker_capability() -> Option<HidWorkerCapability> {
     hid_capability_for(ScopeAuthority::MxCreativeReview)
+}
+
+#[cfg(any(feature = "mx-creative-hid", test))]
+pub(crate) fn display_info_hid_worker_capability() -> Option<HidWorkerCapability> {
+    hid_capability_for(ScopeAuthority::MxCreativeDisplayInfo)
 }
 
 #[cfg(any(
@@ -244,6 +250,13 @@ pub(super) fn validate_platform_request(request: &DiagnosticRequest) -> Result<D
             options.validate().map_err(|_| Kind::InvalidRequest)?;
             Ok(options.budget())
         }
+        "mx_creative_display_info" => {
+            let options: crate::devices::mx_creative::display_info::Options =
+                serde_json::from_value(request.payload.clone())
+                    .map_err(|_| Kind::InvalidRequest)?;
+            options.validate().map_err(|_| Kind::InvalidRequest)?;
+            Ok(options.budget())
+        }
         "ct_serial_probe" => {
             let options: crate::devices::ct::probe::Options =
                 serde_json::from_value(request.payload.clone())
@@ -264,6 +277,7 @@ fn request_authority(request: &DiagnosticRequest) -> Result<ScopeAuthority, Kind
         "health" => Ok(ScopeAuthority::Health),
         "ct_serial_probe" => Ok(ScopeAuthority::CtSerialProbe),
         "mx_creative_evidence" => Ok(ScopeAuthority::HidLive),
+        "mx_creative_display_info" => Ok(ScopeAuthority::MxCreativeDisplayInfo),
         "micro_hid_probe" | "akp03_hid_probe" => {
             if request.payload["health_check"] == false {
                 Ok(ScopeAuthority::HidLive)

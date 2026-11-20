@@ -554,6 +554,13 @@ impl IoKitHid {
         Ok(Self { capability })
     }
 
+    #[cfg(feature = "mx-creative-hid")]
+    pub(super) fn new_for_mx_creative_display_info() -> Result<Self, HidError> {
+        let capability = crate::native::windows_worker::display_info_hid_worker_capability()
+            .ok_or(HidError::Unavailable(UnavailableReason::UnsupervisedAccess))?;
+        Ok(Self { capability })
+    }
+
     fn authorize(&self) -> Result<(), HidError> {
         if self.capability.valid() {
             Ok(())
