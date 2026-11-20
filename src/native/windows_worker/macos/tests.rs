@@ -320,6 +320,7 @@ fn isolated(test: &str) {
 fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
     assert!(hid_worker_capability().is_none());
     assert!(display_info_hid_worker_capability().is_none());
+    assert!(display_route_hid_worker_capability().is_none());
     assert!(firmware_info_hid_worker_capability().is_none());
     assert!(review_hid_worker_capability().is_none());
     assert!(ct_worker_capability().is_none());
@@ -340,6 +341,10 @@ fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
         (
             "__mx-creative-display-info-worker",
             crate::cli::mx_creative_display_info_allowlist().unwrap(),
+        ),
+        (
+            "__mx-creative-display-route-worker",
+            crate::cli::mx_creative_display_route_allowlist().unwrap(),
         ),
         (
             "__mx-creative-firmware-info-worker",
@@ -383,10 +388,24 @@ fn macos_mx_creative_request_gets_live_read_authority_without_health_field() {
     );
     assert_eq!(
         request_authority(&DiagnosticRequest {
+            kind: "mx_creative_display_route".into(),
+            payload: Value::Null,
+        }),
+        Ok(ScopeAuthority::MxCreativeDisplayRoute)
+    );
+    assert_eq!(
+        request_authority(&DiagnosticRequest {
             kind: "mx_creative_firmware_info".into(),
             payload: serde_json::json!({}),
         }),
         Ok(ScopeAuthority::MxCreativeFirmwareInfo)
+    );
+    assert_eq!(
+        validate_platform_request(&DiagnosticRequest {
+            kind: "mx_creative_display_route".into(),
+            payload: Value::Null,
+        }),
+        Ok(Duration::from_secs(8))
     );
     assert_eq!(
         validate_platform_request(&DiagnosticRequest {

@@ -21,6 +21,8 @@ pub struct FakeState {
     pub writes_unsupported: bool,
     pub report_descriptor: Option<Vec<u8>>,
     pub exclusive_open_result: Option<ExclusiveOpenProbe>,
+    pub route_open_result: Option<OutputRouteOpenProof>,
+    pub route_open_calls: usize,
 }
 
 pub struct FakeBackend {
@@ -91,6 +93,17 @@ impl HidBackend for FakeBackend {
             return Err(HidError::NotFound);
         }
         state.exclusive_open_result.ok_or(HidError::Unavailable(
+            UnavailableReason::UnsupportedPlatform,
+        ))
+    }
+
+    fn open_route_probe(&self, d: &HidDescriptor) -> Result<OutputRouteOpenProof, HidError> {
+        let state = &mut *self.state.borrow_mut();
+        state.route_open_calls += 1;
+        if !self.devices.contains(d) {
+            return Err(HidError::NotFound);
+        }
+        state.route_open_result.clone().ok_or(HidError::Unavailable(
             UnavailableReason::UnsupportedPlatform,
         ))
     }

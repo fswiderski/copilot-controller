@@ -234,3 +234,42 @@ The default phase does not qualify the display path and provides no
 direct-write icon authority. It supplies a fail-safe feature map and KeepAlive
 range only. The opt-in check adds only bounded brightness GETs and one
 fixed-duration KeepAlive timeout activation.
+
+## 7. Strict no-paint display output-route proof
+
+`mx-creative-display-route` is a separate macOS ARM64 worker route with
+`MxCreativeDisplayRoute` authority. It accepts no options and is not a paint,
+preview, query, or live-capture command. Its purpose is only to prove where
+report `0x14` would be addressed without sending that report.
+
+The route enumerates every IOKit service matching exactly USB `046d:c354`,
+requires the one exact `MX Creative Keypad` service and its pinned 140-byte
+descriptor digest, and parses that original descriptor into collection usages
+and output report lengths. Report `20` must belong to the vendor collection
+`0xff43/0x1a10` and have a normalized length of exactly 4095 bytes. The
+selected service's primary usage remains `0x1a02` when macOS exposes the
+merged composite service; a separately exposed `0x1a10` primary is accepted
+only if every other identity and descriptor fact remains exact.
+
+After structural verification, the native backend opens that same service
+with `IOHIDDeviceOpen(..., 0)`, rechecks the complete selected identity and
+descriptor, and closes it immediately. This path installs no input callback
+and returns no `HidTransport`; it has no read, write, `SetReport`, feature, or
+image capability. A transport close failure or any reopened mismatch is a
+command failure. The result reports zero output HID reports and zero image
+payloads.
+
+The only physical procedure authorized by this command is:
+
+1. Build reviewed code with `mx-creative-hid`.
+2. Connect the exact console keypad.
+3. Run `mx-creative-display-route` once from a local console.
+4. Confirm one candidate has `route: "single_iokit_device"`,
+   `display_collection_present: true`, output report ID `20`, normalized
+   output length `4095`, the pinned descriptor hash, and successful immediate
+   open/close.
+5. Confirm separately that the display image did not change.
+
+The route proves a structural address and nonexclusive IOKit open/close only.
+It does not send report `0x14`, does not send an image, and does not establish
+display command readiness, physical painting safety, or hardware qualification.

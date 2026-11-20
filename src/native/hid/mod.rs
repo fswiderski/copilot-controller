@@ -305,6 +305,18 @@ pub trait HidBackend {
             UnavailableReason::UnsupportedPlatform,
         ))
     }
+
+    /// Opens the exact selected service at non-exclusive option zero, verifies
+    /// its identity after open, closes it, and returns metadata only. No
+    /// callback, read, write, feature, or report operation is permitted.
+    fn open_route_probe(
+        &self,
+        _descriptor: &HidDescriptor,
+    ) -> Result<OutputRouteOpenProof, HidError> {
+        Err(HidError::Unavailable(
+            UnavailableReason::UnsupportedPlatform,
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -314,6 +326,14 @@ pub struct ExclusiveOpenProbe {
     pub released: bool,
     pub open_code: i64,
     pub close_code: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputRouteOpenProof {
+    pub descriptor: HidDescriptor,
+    pub report_descriptor: Vec<u8>,
+    pub opened: bool,
+    pub closed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -378,6 +398,39 @@ pub(crate) enum MxCreativeDisplayReply {
 
 pub(crate) struct MxCreativeDisplayInfoBackend {
     inner: Box<dyn HidBackend>,
+}
+
+pub(crate) struct MxCreativeDisplayRouteBackend {
+    inner: Box<dyn HidBackend>,
+}
+
+impl MxCreativeDisplayRouteBackend {
+    pub(crate) fn enumerate(
+        &self,
+        matcher: &HidMatcher,
+        limit: usize,
+    ) -> Result<Vec<HidDescriptor>, HidError> {
+        enumerate(self.inner.as_ref(), matcher, limit)
+    }
+
+    pub(crate) fn original_report_descriptor_evidence(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> Result<ReportDescriptorEvidence, HidError> {
+        self.inner.original_report_descriptor_evidence(descriptor)
+    }
+
+    pub(crate) fn open_route_probe(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> Result<OutputRouteOpenProof, HidError> {
+        self.inner.open_route_probe(descriptor)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_backend(inner: Box<dyn HidBackend>) -> Self {
+        Self { inner }
+    }
 }
 
 impl MxCreativeDisplayInfoBackend {
@@ -1025,6 +1078,33 @@ pub(crate) fn mx_creative_firmware_info_backend() -> Result<MxCreativeFirmwareIn
     {
         Ok(MxCreativeFirmwareInfoBackend {
             inner: Box::new(iokit::IoKitHid::new_for_mx_creative_firmware_info()?),
+        })
+    }
+    #[cfg(not(feature = "mx-creative-hid"))]
+    {
+        Err(HidError::Unavailable(UnavailableReason::FeatureDisabled))
+    }
+    #[cfg(all(
+        feature = "mx-creative-hid",
+        not(all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    {
+        Err(HidError::Unavailable(
+            UnavailableReason::UnsupportedPlatform,
+        ))
+    }
+}
+
+pub(crate) fn mx_creative_display_route_backend() -> Result<MxCreativeDisplayRouteBackend, HidError>
+{
+    #[cfg(all(
+        feature = "mx-creative-hid",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    {
+        Ok(MxCreativeDisplayRouteBackend {
+            inner: Box::new(iokit::IoKitHid::new_for_mx_creative_display_route()?),
         })
     }
     #[cfg(not(feature = "mx-creative-hid"))]

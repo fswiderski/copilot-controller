@@ -538,6 +538,41 @@ impl HidBackend for IoKitHid {
             |device| describe(device, d.identity),
         )
     }
+
+    fn open_route_probe(&self, d: &HidDescriptor) -> Result<OutputRouteOpenProof, HidError> {
+        self.authorize()?;
+        let matched = Matched::new(d.identity)?;
+        let dev = self.find_device(&matched, d, false)?;
+        let dev = Cf(unsafe { CFRetain(dev) });
+        let open_code = unsafe { IOHIDDeviceOpen(dev.0, 0) };
+        if open_code != 0 {
+            return Err(HidError::Os {
+                op: HidOp::Open,
+                code: i64::from(open_code),
+            });
+        }
+        let reopened = describe(dev.0, d.identity);
+        let report_descriptor = original_report_descriptor(dev.0);
+        let close_code = unsafe { IOHIDDeviceClose(dev.0, 0) };
+        if close_code != 0 {
+            return Err(HidError::Os {
+                op: HidOp::Close,
+                code: i64::from(close_code),
+            });
+        }
+        let descriptor = reopened.ok_or(HidError::NotFound)?;
+        if !same_open_identity(&descriptor, d, false) {
+            return Err(HidError::NotFound);
+        }
+        Ok(OutputRouteOpenProof {
+            descriptor,
+            report_descriptor: report_descriptor.ok_or(HidError::EvidenceUnavailable(
+                EvidenceKind::RawReportDescriptor,
+            ))?,
+            opened: true,
+            closed: true,
+        })
+    }
 }
 
 impl IoKitHid {
@@ -557,6 +592,13 @@ impl IoKitHid {
     #[cfg(feature = "mx-creative-hid")]
     pub(super) fn new_for_mx_creative_display_info() -> Result<Self, HidError> {
         let capability = crate::native::windows_worker::display_info_hid_worker_capability()
+            .ok_or(HidError::Unavailable(UnavailableReason::UnsupervisedAccess))?;
+        Ok(Self { capability })
+    }
+
+    #[cfg(feature = "mx-creative-hid")]
+    pub(super) fn new_for_mx_creative_display_route() -> Result<Self, HidError> {
+        let capability = crate::native::windows_worker::display_route_hid_worker_capability()
             .ok_or(HidError::Unavailable(UnavailableReason::UnsupervisedAccess))?;
         Ok(Self { capability })
     }

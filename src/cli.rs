@@ -4,6 +4,7 @@
 mod ct_probe;
 mod hid_probe;
 mod mx_creative_display_info;
+mod mx_creative_display_route;
 mod mx_creative_evidence;
 mod mx_creative_firmware_info;
 mod review_input;
@@ -67,6 +68,8 @@ Usage: copilot-controller <command>
   mx-creative-evidence [--capture-ms <0..30000>] (finite read-only HID evidence)
   mx-creative-display-info [--hold-keepalive-ms 1000]
            (default metadata-only; explicit fixed volatile GET/hold check)
+  mx-creative-display-route
+           (no-paint output-route proof; no report or image is sent)
   mx-creative-firmware-info
            (bounded read-only HID++ firmware metadata; no options)
   review-input --device mx-creative (private foreground action stream)
@@ -126,6 +129,7 @@ pub enum Command {
     Akp03Probe(akp03::probe::Akp03ProbeOptions),
     MxCreativeEvidence(mx_creative::probe::Options),
     MxCreativeDisplayInfo(mx_creative::display_info::Options),
+    MxCreativeDisplayRoute,
     MxCreativeFirmwareInfo(mx_creative::firmware_info::Options),
     ReviewInput,
     FirmwarePlan {
@@ -287,6 +291,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "mx-creative-display-info" => {
             return mx_creative_display_info::parse(args).map(Command::MxCreativeDisplayInfo);
         }
+        "mx-creative-display-route" => {
+            return mx_creative_display_route::parse(args)
+                .map(|()| Command::MxCreativeDisplayRoute);
+        }
         "mx-creative-firmware-info" => {
             return mx_creative_firmware_info::parse(args).map(Command::MxCreativeFirmwareInfo);
         }
@@ -418,6 +426,7 @@ fn capabilities() -> Value {
         "akp03_hid_probe_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "akp03-hid")),
         "mx_creative_evidence_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
         "mx_creative_display_info_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
+        "mx_creative_display_route_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
         "mx_creative_firmware_info_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
         "firmware_execution_available": false,
         "runtime_owner_acquired": false,
@@ -603,6 +612,7 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
         Command::Akp03Probe(options) => hid_probe::execute(hid_probe::Options::Akp03(options)),
         Command::MxCreativeEvidence(options) => mx_creative_evidence::execute(options),
         Command::MxCreativeDisplayInfo(options) => mx_creative_display_info::execute(options),
+        Command::MxCreativeDisplayRoute => mx_creative_display_route::execute(),
         Command::MxCreativeFirmwareInfo(options) => mx_creative_firmware_info::execute(options),
         Command::ReviewInput => Err("review-input requires the streaming CLI route".into()),
         Command::FirmwarePlan { image, tool } => {
@@ -656,6 +666,12 @@ static MX_CREATIVE_DISPLAY_INFO_CALLBACKS: [worker::DiagnosticCallback; 1] =
         mx_creative_display_info::callback,
     )];
 
+static MX_CREATIVE_DISPLAY_ROUTE_CALLBACKS: [worker::DiagnosticCallback; 1] =
+    [worker::DiagnosticCallback::new(
+        mx_creative_display_route::KIND,
+        mx_creative_display_route::callback,
+    )];
+
 static MX_CREATIVE_FIRMWARE_INFO_CALLBACKS: [worker::DiagnosticCallback; 1] =
     [worker::DiagnosticCallback::new(
         mx_creative_firmware_info::KIND,
@@ -705,6 +721,14 @@ pub fn mx_creative_display_info_allowlist() -> Result<worker::DiagnosticAllowlis
     worker::DiagnosticAllowlist::new_for_route(
         &MX_CREATIVE_DISPLAY_INFO_CALLBACKS,
         worker::DiagnosticWorkerRoute::MxCreativeDisplayInfo,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn mx_creative_display_route_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
+    worker::DiagnosticAllowlist::new_for_route(
+        &MX_CREATIVE_DISPLAY_ROUTE_CALLBACKS,
+        worker::DiagnosticWorkerRoute::MxCreativeDisplayRoute,
     )
     .map_err(|error| error.to_string())
 }

@@ -17,6 +17,10 @@ fn main() -> ExitCode {
         argument == windows_worker::MX_CREATIVE_DISPLAY_INFO_HIDDEN_WORKER_ARGUMENT
     }) {
         cli::mx_creative_display_info_allowlist()
+    } else if args.first().is_some_and(|argument| {
+        argument == windows_worker::MX_CREATIVE_DISPLAY_ROUTE_HIDDEN_WORKER_ARGUMENT
+    }) {
+        cli::mx_creative_display_route_allowlist()
     } else if args
         .first()
         .is_some_and(|argument| argument == windows_worker::AKP03_HIDDEN_WORKER_ARGUMENT)

@@ -70,6 +70,14 @@ fn inventory_and_doctor_are_truthful_and_never_action_ready() {
         capabilities["ct_serial_probe_available"],
         cfg!(windows) || cfg!(all(target_os = "macos", target_arch = "aarch64"))
     );
+    assert_eq!(
+        capabilities["mx_creative_display_route_available"],
+        cfg!(all(
+            target_os = "macos",
+            target_arch = "aarch64",
+            feature = "mx-creative-hid"
+        ))
+    );
     assert_eq!(capabilities["firmware_execution_available"], false);
     assert_eq!(capabilities["runtime_owner_acquired"], false);
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
