@@ -26,12 +26,12 @@ const DISPLAY_USAGE: u16 = 0x1a10;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 pub const BUDGET: Duration = Duration::from_secs(20);
 pub const HOLD_MS: u16 = 5000;
-pub const ROLLBACK_WAIT_MS: u16 = 2200;
+pub const ROLLBACK_WAIT_MS: u16 = 3200;
 pub const KEEPALIVE_MS: u16 = 3000;
 pub const KEEPALIVE_FEATURE_ID: u16 = 0x0008;
 pub const KEEPALIVE_REFRESH_MS: u16 = 2000;
-pub const KEYS_TARGETED: u8 = 7;
-pub const TOTAL_PAINT_FRAMES: u16 = 7;
+pub const KEYS_TARGETED: u8 = 1;
+pub const TOTAL_PAINT_FRAMES: u16 = 1;
 pub const EXPECTED_KEEPALIVE_ACTIVATIONS: u16 = 3;
 pub const EXPECTED_HIDPP_REPORTS: u16 = 5;
 const DISPLAY_WIDTH: u16 = 480;
@@ -39,12 +39,75 @@ const DISPLAY_HEIGHT: u16 = 480;
 const FRAME_FUNCTION_SWID: u8 = 0x21;
 const FRAME_SEQUENCE: u8 = 0xe0;
 const DISPLAY_COLLECTION_MARKER_HEX: &str = "0643ff0a101aa101851496fe0f7508150026ff000910920201";
-const ASK_USER_ACCEPT_PHRASE: &str = "READY_SEVEN_COLORED_ICONS";
+const ASK_USER_ACCEPT_PHRASE: &str = "READY_COLORED_ICON";
 const SOURCE_REPOSITORY: &str = "fes/fesReview-mx-icons";
 const SOURCE_COMMIT: &str = "7a339c9";
 const SOURCE_SVG_ROOT: &str = "assets/mx-keypad-icons";
 const SOURCE_PNG_DIMENSION: usize = 480;
 const ICON_JPEG_QUALITY: u8 = 75;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IconName {
+    PlayPause,
+    FirstFrame,
+    LastFrame,
+    Back1s,
+    Forward1s,
+    Screenshot,
+    Dictate,
+}
+
+impl IconName {
+    pub const ALL: [Self; 7] = [
+        Self::PlayPause,
+        Self::FirstFrame,
+        Self::LastFrame,
+        Self::Back1s,
+        Self::Forward1s,
+        Self::Screenshot,
+        Self::Dictate,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PlayPause => "play-pause",
+            Self::FirstFrame => "first-frame",
+            Self::LastFrame => "last-frame",
+            Self::Back1s => "back-1s",
+            Self::Forward1s => "forward-1s",
+            Self::Screenshot => "screenshot",
+            Self::Dictate => "dictate",
+        }
+    }
+}
+
+impl std::str::FromStr for IconName {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "play-pause" => Ok(Self::PlayPause),
+            "first-frame" => Ok(Self::FirstFrame),
+            "last-frame" => Ok(Self::LastFrame),
+            "back-1s" => Ok(Self::Back1s),
+            "forward-1s" => Ok(Self::Forward1s),
+            "screenshot" => Ok(Self::Screenshot),
+            "dictate" => Ok(Self::Dictate),
+            _ => Err("icon must be one of: play-pause, first-frame, last-frame, back-1s, forward-1s, screenshot, dictate".into()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Options {
+    pub icon: IconName,
+}
+
+impl Options {
+    pub fn validate(&self) {}
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,14 +213,27 @@ pub struct Result {
 
 impl Default for ParentReadinessForm {
     fn default() -> Self {
+        Self::for_icon(IconName::PlayPause)
+    }
+}
+
+impl ParentReadinessForm {
+    pub(crate) fn for_icon(icon: IconName) -> Self {
+        let key_index = icon_key_index(icon).expect("icon mapping is static");
         Self {
             required: true,
             tool: "ask_user".into(),
-            title: "MX Creative seven-key colored icon readiness".into(),
-            prompt: "Confirm physical readiness for seven-key colored icon paint on keys 1..7. Keys 8..9 remain untouched. Observe static icons for about five seconds, then confirm natural KeepAlive rollback near seven seconds from start. Parent must show a visible prompt, then run a 3-2-1 audible countdown before command execution.".into(),
+            title: "MX Creative single colored icon readiness".into(),
+            prompt: format!(
+                "Confirm physical readiness for single colored icon paint on key {key_index} ({icon_name}). Observe static icon for about five seconds, then confirm natural KeepAlive rollback near eight seconds from start. Parent must show a visible prompt, then run a 3-2-1 audible countdown before command execution.",
+                icon_name = icon.as_str()
+            ),
             accept_phrase: ASK_USER_ACCEPT_PHRASE.into(),
             countdown_seconds: 3,
-            command: "mx-creative-colored-icon-test --confirm-seven-colored-icons".into(),
+            command: format!(
+                "mx-creative-colored-icon-test --confirm-colored-icon {}",
+                icon.as_str()
+            ),
         }
     }
 }
@@ -174,39 +250,46 @@ struct IconFrame {
     jpeg_contains_app1: bool,
 }
 
-pub(crate) fn expected_icon_names() -> Vec<&'static str> {
-    icon_sources().iter().map(|(name, _, _)| *name).collect()
+#[derive(Clone, Copy)]
+struct IconSource {
+    icon: IconName,
+    key_index: u8,
+    name: &'static str,
+    source_svg_path: &'static str,
+    png: &'static [u8],
 }
 
-pub(crate) fn expected_icon_source_svg_paths() -> Vec<&'static str> {
+pub(crate) fn expected_icon_specs() -> Vec<(u8, &'static str, &'static str)> {
     icon_sources()
         .iter()
-        .map(|(_, source, _)| *source)
+        .map(|source| (source.key_index, source.name, source.source_svg_path))
         .collect()
 }
 
-pub(crate) fn run(backend: &MxCreativeSingleKeyPaintBackend) -> Result {
-    run_with_sleep(backend, std::thread::sleep)
+pub(crate) fn run(backend: &MxCreativeSingleKeyPaintBackend, options: Options) -> Result {
+    run_with_sleep(backend, options, std::thread::sleep)
 }
 
 fn run_with_sleep(
     backend: &MxCreativeSingleKeyPaintBackend,
+    options: Options,
     mut sleep: impl FnMut(Duration),
 ) -> Result {
     let started = Instant::now();
-    let mut result = base_result();
+    let mut result = base_result(options.icon);
     let selected = match select(backend) {
         Ok(descriptor) => descriptor,
         Err(error) => return finish_failure(result, error, started),
     };
-    let rects = match expected_target_rects_checked() {
-        Ok(rects) => rects,
+    let icon = match icon_frame(options.icon) {
+        Ok(icon) => icon,
         Err(error) => return finish_failure(result, error, started),
     };
-    let icons = match icon_frames() {
-        Ok(icons) => icons,
+    let rect = match expected_target_rect_checked(icon.key_index) {
+        Ok(rect) => rect,
         Err(error) => return finish_failure(result, error, started),
     };
+    let untouched_keys = (1u8..=9).filter(|key| *key != icon.key_index).collect();
 
     result.paint = Some(PaintEvidence {
         report_id: OUTPUT_REPORT_ID,
@@ -214,25 +297,22 @@ fn run_with_sleep(
         header_len: JPEG_HEADER_LEN,
         frame_function_swid: FRAME_FUNCTION_SWID,
         frame_sequence: FRAME_SEQUENCE,
-        key_rects: rects.clone(),
-        targeted_keys: (1..=KEYS_TARGETED).collect(),
-        untouched_keys: vec![8, 9],
+        key_rects: vec![rect],
+        targeted_keys: vec![icon.key_index],
+        untouched_keys,
         source_repository: SOURCE_REPOSITORY.into(),
         source_commit: SOURCE_COMMIT.into(),
         source_svg_root: SOURCE_SVG_ROOT.into(),
-        icons: icons
-            .iter()
-            .map(|icon| IconEvidence {
-                key_index: icon.key_index,
-                name: icon.name.into(),
-                source_svg_path: icon.source_svg_path.into(),
-                source_png_sha256: icon.source_png_sha256.clone(),
-                jpeg_len: icon.jpeg.len(),
-                jpeg_sha256: icon.jpeg_sha256.clone(),
-                jpeg_baseline_jfif: icon.jpeg_baseline_jfif,
-                jpeg_contains_app1: icon.jpeg_contains_app1,
-            })
-            .collect(),
+        icons: vec![IconEvidence {
+            key_index: icon.key_index,
+            name: icon.name.into(),
+            source_svg_path: icon.source_svg_path.into(),
+            source_png_sha256: icon.source_png_sha256.clone(),
+            jpeg_len: icon.jpeg.len(),
+            jpeg_sha256: icon.jpeg_sha256.clone(),
+            jpeg_baseline_jfif: icon.jpeg_baseline_jfif,
+            jpeg_contains_app1: icon.jpeg_contains_app1,
+        }],
         total_frames_expected: TOTAL_PAINT_FRAMES,
         total_frames_sent: 0,
         hold_ms: HOLD_MS,
@@ -278,21 +358,19 @@ fn run_with_sleep(
         return finish_failure(result, error, started);
     }
 
-    for (index, icon) in icons.iter().enumerate() {
-        let paint_report = match frame_paint_report(rects[index], &icon.jpeg) {
-            Ok(report) => report,
-            Err(error) => return finish_failure(result, error, started),
-        };
-        if let Err(error) = device.write_display_report(&paint_report) {
-            return finish_failure(result, error.to_string(), started);
-        }
-        result.paint_reports_sent += 1;
-        result.hid_output_reports_sent += 1;
-        result.hid_output_bytes_sent += OUTPUT_REPORT_LEN;
-        result.keys_completed += 1;
-        if let Some(paint) = result.paint.as_mut() {
-            paint.total_frames_sent = result.paint_reports_sent;
-        }
+    let paint_report = match frame_paint_report(rect, &icon.jpeg) {
+        Ok(report) => report,
+        Err(error) => return finish_failure(result, error, started),
+    };
+    if let Err(error) = device.write_display_report(&paint_report) {
+        return finish_failure(result, error.to_string(), started);
+    }
+    result.paint_reports_sent += 1;
+    result.hid_output_reports_sent += 1;
+    result.hid_output_bytes_sent += OUTPUT_REPORT_LEN;
+    result.keys_completed += 1;
+    if let Some(paint) = result.paint.as_mut() {
+        paint.total_frames_sent = result.paint_reports_sent;
     }
 
     sleep(Duration::from_millis(u64::from(KEEPALIVE_REFRESH_MS)));
@@ -519,122 +597,142 @@ fn verify_descriptor_identity(descriptor: &HidDescriptor) -> std::result::Result
     Ok(())
 }
 
-fn expected_target_rects_checked() -> std::result::Result<Vec<PaintRect>, String> {
-    let mut rects = expected_key_rects();
-    rects.truncate(usize::from(KEYS_TARGETED));
-    let valid = rects.iter().all(|rect| {
-        rect.width == KEY1_W
-            && rect.height == KEY1_H
-            && rect.x + rect.width <= DISPLAY_WIDTH
-            && rect.y + rect.height <= DISPLAY_HEIGHT
-    });
+fn expected_target_rect_checked(key_index: u8) -> std::result::Result<PaintRect, String> {
+    let rects = expected_key_rects();
+    let rect = rects
+        .get(usize::from(key_index.saturating_sub(1)))
+        .copied()
+        .ok_or_else(|| "derived key rectangle outside 480x480 bounds".to_string())?;
+    let valid = rect.width == KEY1_W
+        && rect.height == KEY1_H
+        && rect.x + rect.width <= DISPLAY_WIDTH
+        && rect.y + rect.height <= DISPLAY_HEIGHT;
     if valid {
-        Ok(rects)
+        Ok(rect)
     } else {
         Err("derived key rectangle outside 480x480 bounds".into())
     }
 }
 
-fn icon_sources() -> [(&'static str, &'static str, &'static [u8]); KEYS_TARGETED as usize] {
+fn icon_sources() -> [IconSource; 7] {
     [
-        (
-            "play-pause",
-            "play-pause.svg",
-            include_bytes!(concat!(
+        IconSource {
+            icon: IconName::PlayPause,
+            key_index: 1,
+            name: "play-pause",
+            source_svg_path: "play-pause.svg",
+            png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/play-pause.png"
             )),
-        ),
-        (
-            "first-frame",
-            "first-frame.svg",
-            include_bytes!(concat!(
+        },
+        IconSource {
+            icon: IconName::FirstFrame,
+            key_index: 2,
+            name: "first-frame",
+            source_svg_path: "first-frame.svg",
+            png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/first-frame.png"
             )),
-        ),
-        (
-            "last-frame",
-            "last-frame.svg",
-            include_bytes!(concat!(
+        },
+        IconSource {
+            icon: IconName::LastFrame,
+            key_index: 3,
+            name: "last-frame",
+            source_svg_path: "last-frame.svg",
+            png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/last-frame.png"
             )),
-        ),
-        (
-            "back-1s",
-            "back-1s.svg",
-            include_bytes!(concat!(
+        },
+        IconSource {
+            icon: IconName::Back1s,
+            key_index: 4,
+            name: "back-1s",
+            source_svg_path: "back-1s.svg",
+            png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/back-1s.png"
             )),
-        ),
-        (
-            "forward-1s",
-            "forward-1s.svg",
-            include_bytes!(concat!(
+        },
+        IconSource {
+            icon: IconName::Forward1s,
+            key_index: 5,
+            name: "forward-1s",
+            source_svg_path: "forward-1s.svg",
+            png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/forward-1s.png"
             )),
-        ),
-        (
-            "screenshot",
-            "screenshot.svg",
-            include_bytes!(concat!(
+        },
+        IconSource {
+            icon: IconName::Screenshot,
+            key_index: 6,
+            name: "screenshot",
+            source_svg_path: "screenshot.svg",
+            png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/screenshot.png"
             )),
-        ),
-        (
-            "dictate",
-            "dictate.svg",
-            include_bytes!(concat!(
+        },
+        IconSource {
+            icon: IconName::Dictate,
+            key_index: 7,
+            name: "dictate",
+            source_svg_path: "dictate.svg",
+            png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/dictate.png"
             )),
-        ),
+        },
     ]
 }
 
-fn icon_frames() -> std::result::Result<Vec<IconFrame>, String> {
+fn icon_key_index(icon: IconName) -> Option<u8> {
     icon_sources()
-        .iter()
-        .enumerate()
-        .map(|(index, (name, source_svg_path, png_bytes))| {
-            let (width, height, rgb) = decode_png_to_rgb(png_bytes)?;
-            if width != SOURCE_PNG_DIMENSION || height != SOURCE_PNG_DIMENSION {
-                return Err("source PNG dimensions must be exactly 480x480".into());
-            }
-            let resized = resize_nearest_rgb(
-                &rgb,
-                width,
-                height,
-                usize::from(KEY1_W),
-                usize::from(KEY1_H),
-            )?;
-            let jpeg = encode_icon_jpeg(&resized)?;
-            let inspected = inspect_jpeg(&jpeg)?;
-            if !inspected.has_jfif_app0 {
-                return Err("icon JPEG missing baseline JFIF APP0".into());
-            }
-            if inspected.has_app1 {
-                return Err("icon JPEG still contains APP1 metadata".into());
-            }
-            if inspected.progressive {
-                return Err("icon JPEG must remain baseline (non-progressive)".into());
-            }
-            Ok(IconFrame {
-                key_index: u8::try_from(index + 1).expect("key index is bounded"),
-                name,
-                source_svg_path,
-                source_png_sha256: report_descriptor_sha256(png_bytes),
-                jpeg_sha256: report_descriptor_sha256(&jpeg),
-                jpeg,
-                jpeg_baseline_jfif: inspected.has_jfif_app0 && !inspected.progressive,
-                jpeg_contains_app1: inspected.has_app1,
-            })
-        })
-        .collect()
+        .into_iter()
+        .find(|source| source.icon == icon)
+        .map(|source| source.key_index)
+}
+
+fn icon_frame(icon: IconName) -> std::result::Result<IconFrame, String> {
+    let source = icon_sources()
+        .into_iter()
+        .find(|source| source.icon == icon)
+        .ok_or_else(|| "icon metadata missing".to_string())?;
+    let (width, height, rgb) = decode_png_to_rgb(source.png)?;
+    if width != SOURCE_PNG_DIMENSION || height != SOURCE_PNG_DIMENSION {
+        return Err("source PNG dimensions must be exactly 480x480".into());
+    }
+    let resized = resize_nearest_rgb(
+        &rgb,
+        width,
+        height,
+        usize::from(KEY1_W),
+        usize::from(KEY1_H),
+    )?;
+    let jpeg = encode_icon_jpeg(&resized)?;
+    let inspected = inspect_jpeg(&jpeg)?;
+    if !inspected.has_jfif_app0 {
+        return Err("icon JPEG missing baseline JFIF APP0".into());
+    }
+    if inspected.has_app1 {
+        return Err("icon JPEG still contains APP1 metadata".into());
+    }
+    if inspected.progressive {
+        return Err("icon JPEG must remain baseline (non-progressive)".into());
+    }
+    Ok(IconFrame {
+        key_index: source.key_index,
+        name: source.name,
+        source_svg_path: source.source_svg_path,
+        source_png_sha256: report_descriptor_sha256(source.png),
+        jpeg_sha256: report_descriptor_sha256(&jpeg),
+        jpeg,
+        jpeg_baseline_jfif: inspected.has_jfif_app0 && !inspected.progressive,
+        jpeg_contains_app1: inspected.has_app1,
+    })
 }
 
 fn decode_png_to_rgb(bytes: &[u8]) -> std::result::Result<(usize, usize, Vec<u8>), String> {
@@ -845,13 +943,13 @@ fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|slice| slice == needle)
 }
 
-fn base_result() -> Result {
+fn base_result(icon: IconName) -> Result {
     Result {
         schema: 1,
         semantic_read_only: false,
-        parent_readiness_form: ParentReadinessForm::default(),
+        parent_readiness_form: ParentReadinessForm::for_icon(icon),
         operator_warning: "Visible confirmation is required before physical execution. Native SetReport success is not visual proof.".into(),
-        rollback: "No refresh or cancel is sent. Keys 8..9 are untouched. KeepAlive expires naturally near seven seconds from start and rolls back volatile key-1..7 frames.".into(),
+        rollback: "No refresh or cancel is sent. KeepAlive expires naturally near eight seconds from start and rolls back the selected volatile icon frame.".into(),
         visual_result_may_be_inconclusive: true,
         no_brightness_or_config_writes: true,
         keys_targeted: KEYS_TARGETED,
@@ -919,29 +1017,17 @@ mod tests {
 
     #[test]
     fn icon_assets_are_baseline_jfif_and_under_payload_cap_without_app1() {
-        let icons = icon_frames().unwrap();
-        assert_eq!(icons.len(), usize::from(KEYS_TARGETED));
-        assert_eq!(
-            icons.iter().map(|icon| icon.name).collect::<Vec<_>>(),
-            expected_icon_names()
-        );
-        assert_eq!(
-            icons
-                .iter()
-                .map(|icon| icon.source_svg_path)
-                .collect::<Vec<_>>(),
-            expected_icon_source_svg_paths()
-        );
-        assert!(
-            icons
-                .iter()
-                .all(|icon| icon.jpeg.len() <= MAX_JPEG_LEN && icon.jpeg_baseline_jfif)
-        );
-        assert!(icons.iter().all(|icon| !icon.jpeg_contains_app1));
+        for icon_name in IconName::ALL {
+            let icon = icon_frame(icon_name).unwrap();
+            assert!(icon.jpeg.len() <= MAX_JPEG_LEN);
+            assert!(icon.jpeg_baseline_jfif);
+            assert!(!icon.jpeg_contains_app1);
+            assert_eq!(icon.name, icon_name.as_str());
+        }
     }
 
     #[test]
-    fn run_paints_only_keys_one_through_seven() {
+    fn run_paints_only_selected_icon_key() {
         let fake = FakeBackend::new(vec![descriptor()]);
         fake.state.borrow_mut().report_descriptor = Some(decode_hex(KEYPAD_DESCRIPTOR_HEX));
         fake.state.borrow_mut().inputs.extend([
@@ -953,7 +1039,13 @@ mod tests {
         ]);
         let state = fake.state.clone();
         let backend = MxCreativeSingleKeyPaintBackend::from_test_backend(Box::new(fake));
-        let result = run_with_sleep(&backend, |_| {});
+        let result = run_with_sleep(
+            &backend,
+            Options {
+                icon: IconName::PlayPause,
+            },
+            |_| {},
+        );
         assert!(result.probe_succeeded, "{result:?}");
         assert_eq!(result.hidpp_reports_sent, EXPECTED_HIDPP_REPORTS);
         assert_eq!(result.paint_reports_sent, TOTAL_PAINT_FRAMES);
@@ -963,19 +1055,16 @@ mod tests {
         );
         assert_eq!(result.keys_completed, KEYS_TARGETED);
         let paint = result.paint.unwrap();
-        assert_eq!(paint.targeted_keys, vec![1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(paint.untouched_keys, vec![8, 9]);
+        assert_eq!(paint.targeted_keys, vec![1]);
+        assert_eq!(paint.untouched_keys, vec![2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(paint.source_commit, SOURCE_COMMIT);
         assert!(paint.hold_wait_completed);
         assert!(paint.rollback_wait_completed);
         let frames = state.borrow().written.clone();
         assert_eq!(frames.len(), usize::from(result.hid_output_reports_sent));
-        let first_paint = &frames[3];
-        let last_paint = &frames[9];
-        assert_eq!(u16::from_be_bytes([first_paint[9], first_paint[10]]), 23);
-        assert_eq!(u16::from_be_bytes([first_paint[11], first_paint[12]]), 6);
-        assert_eq!(u16::from_be_bytes([last_paint[9], last_paint[10]]), 23);
-        assert_eq!(u16::from_be_bytes([last_paint[11], last_paint[12]]), 322);
+        let paint_frame = &frames[3];
+        assert_eq!(u16::from_be_bytes([paint_frame[9], paint_frame[10]]), 23);
+        assert_eq!(u16::from_be_bytes([paint_frame[11], paint_frame[12]]), 6);
     }
 
     #[test]
@@ -990,7 +1079,13 @@ mod tests {
         fake.state.borrow_mut().write_count = Some(19);
         let state = fake.state.clone();
         let backend = MxCreativeSingleKeyPaintBackend::from_test_backend(Box::new(fake));
-        let result = run_with_sleep(&backend, |_| {});
+        let result = run_with_sleep(
+            &backend,
+            Options {
+                icon: IconName::PlayPause,
+            },
+            |_| {},
+        );
         assert!(!result.probe_succeeded);
         assert_eq!(
             result.error.as_deref(),

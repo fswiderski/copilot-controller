@@ -5,10 +5,9 @@ use serde_json::{Value, json};
 use crate::{
     devices::mx_creative::{
         colored_icon_test::{
-            BUDGET, EXPECTED_HIDPP_REPORTS, EXPECTED_KEEPALIVE_ACTIVATIONS, HOLD_MS,
-            KEEPALIVE_FEATURE_ID, KEEPALIVE_MS, KEEPALIVE_REFRESH_MS, KEYS_TARGETED,
-            ParentReadinessForm, ROLLBACK_WAIT_MS, Result, TOTAL_PAINT_FRAMES, expected_icon_names,
-            expected_icon_source_svg_paths,
+            BUDGET, EXPECTED_HIDPP_REPORTS, EXPECTED_KEEPALIVE_ACTIVATIONS, HOLD_MS, IconName,
+            KEEPALIVE_FEATURE_ID, KEEPALIVE_MS, KEEPALIVE_REFRESH_MS, KEYS_TARGETED, Options,
+            ParentReadinessForm, ROLLBACK_WAIT_MS, Result, TOTAL_PAINT_FRAMES, expected_icon_specs,
         },
         single_key_paint::{MAX_JPEG_LEN, OUTPUT_REPORT_ID, OUTPUT_REPORT_LEN, expected_key_rects},
     },
@@ -19,25 +18,33 @@ use super::Output;
 
 pub(super) const KIND: &str = "mx_creative_colored_icon_test";
 
-pub(super) fn parse(args: &[String]) -> std::result::Result<(), String> {
-    match args {
-        [arg] if arg == "--confirm-seven-colored-icons" => Ok(()),
-        _ => Err(
-            "colored icon test requires exactly --confirm-seven-colored-icons and no extra args"
+pub(super) fn parse(args: &[String]) -> std::result::Result<Options, String> {
+    let [flag, icon_name] = args else {
+        return Err(
+            "colored icon test requires exactly --confirm-colored-icon <play-pause|first-frame|last-frame|back-1s|forward-1s|screenshot|dictate>"
                 .into(),
-        ),
+        );
+    };
+    if flag != "--confirm-colored-icon" {
+        return Err(
+            "colored icon test requires exactly --confirm-colored-icon <play-pause|first-frame|last-frame|back-1s|forward-1s|screenshot|dictate>"
+                .into(),
+        );
     }
+    let icon = icon_name.parse::<IconName>()?;
+    Ok(Options { icon })
 }
 
-pub(super) fn execute() -> std::result::Result<Output, String> {
+pub(super) fn execute(options: Options) -> std::result::Result<Output, String> {
     let allowlist =
         super::mx_creative_single_key_paint_allowlist().map_err(|_| worker_error("allowlist"))?;
-    execute_with(|request, budget| {
+    execute_with(options, |request, budget| {
         worker::probe(request, budget, &AtomicBool::new(false), &allowlist)
     })
 }
 
 fn execute_with(
+    options: Options,
     launch: impl FnOnce(
         &worker::DiagnosticRequest,
         Duration,
@@ -45,7 +52,7 @@ fn execute_with(
 ) -> std::result::Result<Output, String> {
     let request = worker::DiagnosticRequest {
         kind: KIND.into(),
-        payload: Value::Null,
+        payload: serde_json::to_value(options).map_err(worker_error)?,
     };
     let response = launch(&request, BUDGET)
         .map_err(|error| json_string(&json!({"status":"worker_error","error":error})))?;
@@ -67,32 +74,34 @@ fn execute_with(
 pub(super) fn callback(
     payload: Value,
 ) -> std::result::Result<Value, worker::DiagnosticCallbackError> {
-    if !payload.is_null() {
-        return Err(worker::DiagnosticCallbackError);
-    }
+    let options: Options =
+        serde_json::from_value(payload).map_err(|_| worker::DiagnosticCallbackError)?;
+    options.validate();
+
     super::health_callback(Value::Null)?;
     if !cfg!(feature = "mx-creative-hid") {
         return serde_json::to_value(failure(
             "unavailable: device-specific HID feature is disabled",
+            options.icon,
         ))
         .map_err(|_| worker::DiagnosticCallbackError);
     }
     let backend = crate::native::hid::mx_creative_single_key_paint_backend()
         .map_err(|_| worker::DiagnosticCallbackError)?;
-    let result = crate::devices::mx_creative::colored_icon_test::run(&backend);
+    let result = crate::devices::mx_creative::colored_icon_test::run(&backend, options);
     if !valid_result(&result) {
         return Err(worker::DiagnosticCallbackError);
     }
     serde_json::to_value(result).map_err(|_| worker::DiagnosticCallbackError)
 }
 
-fn failure(error: &str) -> Result {
+fn failure(error: &str, icon: IconName) -> Result {
     Result {
         schema: 1,
         semantic_read_only: false,
-        parent_readiness_form: ParentReadinessForm::default(),
+        parent_readiness_form: ParentReadinessForm::for_icon(icon),
         operator_warning: "Visible confirmation is required before physical execution. Native SetReport success is not visual proof.".into(),
-        rollback: "No refresh or cancel is sent. Keys 8..9 are untouched. KeepAlive expires naturally near seven seconds from start and rolls back volatile key-1..7 frames.".into(),
+        rollback: "No refresh or cancel is sent. KeepAlive expires naturally near eight seconds from start and rolls back the selected volatile icon frame.".into(),
         visual_result_may_be_inconclusive: true,
         no_brightness_or_config_writes: true,
         keys_targeted: KEYS_TARGETED,
@@ -123,7 +132,7 @@ pub(super) fn valid_result(result: &Result) -> bool {
         && result.operator_warning
             == "Visible confirmation is required before physical execution. Native SetReport success is not visual proof."
         && result.rollback
-            == "No refresh or cancel is sent. Keys 8..9 are untouched. KeepAlive expires naturally near seven seconds from start and rolls back volatile key-1..7 frames.";
+            == "No refresh or cancel is sent. KeepAlive expires naturally near eight seconds from start and rolls back the selected volatile icon frame.";
     if !basics {
         return false;
     }
@@ -143,14 +152,26 @@ pub(super) fn valid_result(result: &Result) -> bool {
     }
 
     if result.probe_succeeded {
-        let expected_icon_names = expected_icon_names();
-        let expected_icon_source_svg_paths = expected_icon_source_svg_paths();
         let Some(keepalive) = &result.keepalive else {
             return false;
         };
         let Some(paint) = &result.paint else {
             return false;
         };
+        let Some(icon) = paint.icons.first() else {
+            return false;
+        };
+        let Some((expected_key, _expected_name, expected_source_svg_path)) = expected_icon_specs()
+            .into_iter()
+            .find(|(_, expected_name, _)| *expected_name == icon.name)
+        else {
+            return false;
+        };
+        let expected_untouched = (1u8..=9)
+            .filter(|key| *key != expected_key)
+            .collect::<Vec<_>>();
+        let expected_rect = expected_key_rects()[usize::from(expected_key - 1)];
+
         keepalive.feature_id == KEEPALIVE_FEATURE_ID
             && keepalive.feature_index != 0
             && keepalive.minimum_ms >= 500
@@ -167,36 +188,21 @@ pub(super) fn valid_result(result: &Result) -> bool {
             && paint.header_len == 20
             && paint.frame_function_swid == 0x21
             && paint.frame_sequence == 0xe0
-            && paint.key_rects == expected_key_rects()[..usize::from(KEYS_TARGETED)]
-            && paint.targeted_keys == vec![1, 2, 3, 4, 5, 6, 7]
-            && paint.untouched_keys == vec![8, 9]
+            && paint.key_rects == vec![expected_rect]
+            && paint.targeted_keys == vec![expected_key]
+            && paint.untouched_keys == expected_untouched
             && paint.source_repository == "fes/fesReview-mx-icons"
             && paint.source_commit == "7a339c9"
             && paint.source_svg_root == "assets/mx-keypad-icons"
-            && paint.icons.len() == expected_icon_names.len()
-            && paint.icons.len() == expected_icon_source_svg_paths.len()
-            && paint
-                .icons
-                .iter()
-                .zip(
-                    expected_icon_names
-                        .iter()
-                        .zip(expected_icon_source_svg_paths.iter()),
-                )
-                .enumerate()
-                .all(
-                    |(index, (icon, (expected_name, expected_source_svg_path)))| {
-                        icon.key_index == u8::try_from(index + 1).expect("bounded key index")
-                            && icon.name == *expected_name
-                            && icon.source_svg_path == *expected_source_svg_path
-                            && valid_digest(&icon.source_png_sha256)
-                            && icon.jpeg_baseline_jfif
-                            && !icon.jpeg_contains_app1
-                            && icon.jpeg_len != 0
-                            && icon.jpeg_len <= MAX_JPEG_LEN
-                            && valid_digest(&icon.jpeg_sha256)
-                    },
-                )
+            && paint.icons.len() == 1
+            && icon.key_index == expected_key
+            && icon.source_svg_path == expected_source_svg_path
+            && valid_digest(&icon.source_png_sha256)
+            && icon.jpeg_baseline_jfif
+            && !icon.jpeg_contains_app1
+            && icon.jpeg_len != 0
+            && icon.jpeg_len <= MAX_JPEG_LEN
+            && valid_digest(&icon.jpeg_sha256)
             && paint.total_frames_expected == TOTAL_PAINT_FRAMES
             && paint.total_frames_sent == TOTAL_PAINT_FRAMES
             && paint.hold_ms == HOLD_MS
@@ -221,20 +227,34 @@ pub(super) fn valid_result(result: &Result) -> bool {
                 .is_none_or(|keepalive| keepalive.requested_ms == KEEPALIVE_MS)
             && result.paint.as_ref().is_none_or(|paint| {
                 paint.total_frames_expected == TOTAL_PAINT_FRAMES
-                    && paint.targeted_keys == vec![1, 2, 3, 4, 5, 6, 7]
-                    && paint.untouched_keys == vec![8, 9]
+                    && paint.targeted_keys.len() <= 1
+                    && paint.icons.len() <= 1
             })
     }
 }
 
 fn valid_readiness(form: &ParentReadinessForm) -> bool {
+    let Some(icon_name) = form
+        .command
+        .strip_prefix("mx-creative-colored-icon-test --confirm-colored-icon ")
+    else {
+        return false;
+    };
+    let Ok(icon) = icon_name.parse::<IconName>() else {
+        return false;
+    };
+
     form.required
         && form.tool == "ask_user"
-        && form.title == "MX Creative seven-key colored icon readiness"
-        && form.accept_phrase == "READY_SEVEN_COLORED_ICONS"
+        && form.title == "MX Creative single colored icon readiness"
+        && form.accept_phrase == "READY_COLORED_ICON"
         && form.countdown_seconds == 3
-        && form.command == "mx-creative-colored-icon-test --confirm-seven-colored-icons"
-        && !form.prompt.is_empty()
+        && form.command
+            == format!(
+                "mx-creative-colored-icon-test --confirm-colored-icon {}",
+                icon.as_str()
+            )
+        && form.prompt.contains(icon.as_str())
 }
 
 fn valid_digest(digest: &str) -> bool {
@@ -340,9 +360,18 @@ mod tests {
 
     #[test]
     fn parser_requires_exact_confirmation_flag() {
-        assert!(parse(&["--confirm-seven-colored-icons".into()]).is_ok());
+        assert!(parse(&["--confirm-colored-icon".into(), "play-pause".into()]).is_ok());
         assert!(parse(&[]).is_err());
-        assert!(parse(&["--confirm-seven-colored-icons".into(), "--extra".into()]).is_err());
+        assert!(parse(&["--confirm-colored-icon".into()]).is_err());
+        assert!(parse(&["--confirm-colored-icon".into(), "unknown".into()]).is_err());
+        assert!(
+            parse(&[
+                "--confirm-colored-icon".into(),
+                "play-pause".into(),
+                "--extra".into()
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -381,28 +410,22 @@ mod tests {
                 header_len: 20,
                 frame_function_swid: 0x21,
                 frame_sequence: 0xe0,
-                key_rects: expected_key_rects()[..usize::from(KEYS_TARGETED)].to_vec(),
-                targeted_keys: vec![1, 2, 3, 4, 5, 6, 7],
-                untouched_keys: vec![8, 9],
+                key_rects: vec![expected_key_rects()[0]],
+                targeted_keys: vec![1],
+                untouched_keys: vec![2, 3, 4, 5, 6, 7, 8, 9],
                 source_repository: "fes/fesReview-mx-icons".into(),
                 source_commit: "7a339c9".into(),
                 source_svg_root: "assets/mx-keypad-icons".into(),
-                icons: expected_icon_names()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, name)| {
-                        crate::devices::mx_creative::colored_icon_test::IconEvidence {
-                            key_index: u8::try_from(index + 1).expect("bounded key index"),
-                            name: (*name).into(),
-                            source_svg_path: expected_icon_source_svg_paths()[index].into(),
-                            source_png_sha256: "0".repeat(64),
-                            jpeg_len: 3000,
-                            jpeg_sha256: "0".repeat(64),
-                            jpeg_baseline_jfif: true,
-                            jpeg_contains_app1: false,
-                        }
-                    })
-                    .collect(),
+                icons: vec![crate::devices::mx_creative::colored_icon_test::IconEvidence {
+                    key_index: 1,
+                    name: "play-pause".into(),
+                    source_svg_path: "play-pause.svg".into(),
+                    source_png_sha256: "0".repeat(64),
+                    jpeg_len: 3000,
+                    jpeg_sha256: "0".repeat(64),
+                    jpeg_baseline_jfif: true,
+                    jpeg_contains_app1: false,
+                }],
                 total_frames_expected: TOTAL_PAINT_FRAMES,
                 total_frames_sent: TOTAL_PAINT_FRAMES,
                 hold_ms: HOLD_MS,
@@ -410,10 +433,10 @@ mod tests {
                 hold_wait_completed: true,
                 rollback_wait_completed: true,
             }),
-            parent_readiness_form: ParentReadinessForm::default(),
+            parent_readiness_form: ParentReadinessForm::for_icon(IconName::PlayPause),
             operator_warning: "Visible confirmation is required before physical execution. Native SetReport success is not visual proof.".into(),
             rollback:
-                "No refresh or cancel is sent. Keys 8..9 are untouched. KeepAlive expires naturally near seven seconds from start and rolls back volatile key-1..7 frames.".into(),
+                "No refresh or cancel is sent. KeepAlive expires naturally near eight seconds from start and rolls back the selected volatile icon frame.".into(),
             visual_result_may_be_inconclusive: true,
             no_brightness_or_config_writes: true,
             hidpp_reports_sent: EXPECTED_HIDPP_REPORTS,

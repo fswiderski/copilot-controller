@@ -76,8 +76,8 @@ Usage: copilot-controller <command>
            (bounded read-only HID++ firmware metadata; no options)
   mx-creative-single-key-paint --confirm-rainbow-nine-keys
            (keys 1..9 sequential volatile rainbow paint, one key at a time)
-  mx-creative-colored-icon-test --confirm-seven-colored-icons
-           (paint original fesReview icons on keys 1..7; keys 8..9 untouched)
+  mx-creative-colored-icon-test --confirm-colored-icon <play-pause|first-frame|last-frame|back-1s|forward-1s|screenshot|dictate>
+           (paint one mapped original fesReview icon; volatile KeepAlive rollback)
   review-input --device mx-creative (private foreground action stream)
 
 All previews and probes are not ready or hardware-qualified. Native probes use
@@ -138,7 +138,7 @@ pub enum Command {
     MxCreativeDisplayRoute,
     MxCreativeFirmwareInfo(mx_creative::firmware_info::Options),
     MxCreativeSingleKeyPaint,
-    MxCreativeColoredIconTest,
+    MxCreativeColoredIconTest(mx_creative::colored_icon_test::Options),
     ReviewInput,
     FirmwarePlan {
         image: PathBuf,
@@ -312,7 +312,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         }
         "mx-creative-colored-icon-test" => {
             return mx_creative_colored_icon_test::parse(args)
-                .map(|()| Command::MxCreativeColoredIconTest);
+                .map(Command::MxCreativeColoredIconTest);
         }
         "review-input" => return review_input::parse(args).map(|()| Command::ReviewInput),
         "micro-probe" | "akp03-probe" => {
@@ -633,7 +633,9 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
         Command::MxCreativeDisplayRoute => mx_creative_display_route::execute(),
         Command::MxCreativeFirmwareInfo(options) => mx_creative_firmware_info::execute(options),
         Command::MxCreativeSingleKeyPaint => mx_creative_single_key_paint::execute(),
-        Command::MxCreativeColoredIconTest => mx_creative_colored_icon_test::execute(),
+        Command::MxCreativeColoredIconTest(options) => {
+            mx_creative_colored_icon_test::execute(options)
+        }
         Command::ReviewInput => Err("review-input requires the streaming CLI route".into()),
         Command::FirmwarePlan { image, tool } => {
             if !cfg!(feature = "micro-firmware") {

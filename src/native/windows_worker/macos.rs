@@ -286,7 +286,11 @@ pub(super) fn validate_platform_request(request: &DiagnosticRequest) -> Result<D
         "mx_creative_single_key_paint" if request.payload.is_null() => {
             Ok(crate::devices::mx_creative::single_key_paint::BUDGET)
         }
-        "mx_creative_colored_icon_test" if request.payload.is_null() => {
+        "mx_creative_colored_icon_test" => {
+            let options: crate::devices::mx_creative::colored_icon_test::Options =
+                serde_json::from_value(request.payload.clone())
+                    .map_err(|_| Kind::InvalidRequest)?;
+            options.validate();
             Ok(crate::devices::mx_creative::colored_icon_test::BUDGET)
         }
         "ct_serial_probe" => {
