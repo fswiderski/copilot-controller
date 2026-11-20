@@ -371,7 +371,7 @@ fn verify_descriptor_identity(descriptor: &HidDescriptor) -> std::result::Result
 
 fn encode_cyan_jpeg() -> std::result::Result<Vec<u8>, String> {
     let mut rgb = vec![0u8; usize::from(KEY1_W) * usize::from(KEY1_H) * 3];
-    for pixel in rgb.chunks_exact_mut(3) {
+    for pixel in rgb.as_chunks_mut::<3>().0 {
         pixel.copy_from_slice(&KEY1_CYAN_RGB);
     }
     let mut jpeg = Vec::new();
