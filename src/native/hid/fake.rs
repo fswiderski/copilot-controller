@@ -122,6 +122,17 @@ impl HidTransport for FakeTransport {
         Ok(s.write_count.unwrap_or(report.len()))
     }
 
+    fn write_mx_creative_display_report(&mut self, report: &[u8]) -> Result<usize, HidError> {
+        if report.len() != MX_CREATIVE_DISPLAY_REPORT_LEN
+            || report.first().copied() != Some(MX_CREATIVE_DISPLAY_REPORT_ID)
+        {
+            return Err(HidError::InvalidArgument(
+                ArgumentError::ReportExceedsDevice,
+            ));
+        }
+        self.write(report)
+    }
+
     fn read(&mut self, buf: &mut [u8], _t: Duration) -> Result<usize, HidError> {
         let mut s = self.0.borrow_mut();
         let Some(r) = s.inputs.pop_front() else {

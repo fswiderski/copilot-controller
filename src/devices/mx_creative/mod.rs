@@ -5,3 +5,4 @@ pub mod display_route;
 pub mod firmware_info;
 pub mod probe;
 pub mod review_input;
+pub mod single_key_paint;

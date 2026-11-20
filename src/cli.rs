@@ -7,6 +7,7 @@ mod mx_creative_display_info;
 mod mx_creative_display_route;
 mod mx_creative_evidence;
 mod mx_creative_firmware_info;
+mod mx_creative_single_key_paint;
 mod review_input;
 
 use std::{
@@ -72,6 +73,8 @@ Usage: copilot-controller <command>
            (no-paint output-route proof; no report or image is sent)
   mx-creative-firmware-info
            (bounded read-only HID++ firmware metadata; no options)
+  mx-creative-single-key-paint --confirm-write-single-key
+           (one key-1 volatile paint write, fixed 2s hold, natural rollback)
   review-input --device mx-creative (private foreground action stream)
 
 All previews and probes are not ready or hardware-qualified. Native probes use
@@ -131,6 +134,7 @@ pub enum Command {
     MxCreativeDisplayInfo(mx_creative::display_info::Options),
     MxCreativeDisplayRoute,
     MxCreativeFirmwareInfo(mx_creative::firmware_info::Options),
+    MxCreativeSingleKeyPaint,
     ReviewInput,
     FirmwarePlan {
         image: PathBuf,
@@ -298,6 +302,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "mx-creative-firmware-info" => {
             return mx_creative_firmware_info::parse(args).map(Command::MxCreativeFirmwareInfo);
         }
+        "mx-creative-single-key-paint" => {
+            return mx_creative_single_key_paint::parse(args)
+                .map(|()| Command::MxCreativeSingleKeyPaint);
+        }
         "review-input" => return review_input::parse(args).map(|()| Command::ReviewInput),
         "micro-probe" | "akp03-probe" => {
             return hid_probe::parse(args, name == "micro-probe").map(|options| match options {
@@ -428,6 +436,7 @@ fn capabilities() -> Value {
         "mx_creative_display_info_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
         "mx_creative_display_route_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
         "mx_creative_firmware_info_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
+        "mx_creative_single_key_paint_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
         "firmware_execution_available": false,
         "runtime_owner_acquired": false,
         "state_store_api_available": cfg!(any(target_os = "linux", target_os = "macos")),
@@ -614,6 +623,7 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
         Command::MxCreativeDisplayInfo(options) => mx_creative_display_info::execute(options),
         Command::MxCreativeDisplayRoute => mx_creative_display_route::execute(),
         Command::MxCreativeFirmwareInfo(options) => mx_creative_firmware_info::execute(options),
+        Command::MxCreativeSingleKeyPaint => mx_creative_single_key_paint::execute(),
         Command::ReviewInput => Err("review-input requires the streaming CLI route".into()),
         Command::FirmwarePlan { image, tool } => {
             if !cfg!(feature = "micro-firmware") {
@@ -678,6 +688,12 @@ static MX_CREATIVE_FIRMWARE_INFO_CALLBACKS: [worker::DiagnosticCallback; 1] =
         mx_creative_firmware_info::callback,
     )];
 
+static MX_CREATIVE_SINGLE_KEY_PAINT_CALLBACKS: [worker::DiagnosticCallback; 1] =
+    [worker::DiagnosticCallback::new(
+        mx_creative_single_key_paint::KIND,
+        mx_creative_single_key_paint::callback,
+    )];
+
 static DIAGNOSTIC_CALLBACKS: [worker::DiagnosticCallback; 4] = [
     worker::DiagnosticCallback::new("health", health_callback),
     worker::DiagnosticCallback::new(ct_probe::KIND, ct_probe::callback),
@@ -737,6 +753,14 @@ pub fn mx_creative_firmware_info_allowlist() -> Result<worker::DiagnosticAllowli
     worker::DiagnosticAllowlist::new_for_route(
         &MX_CREATIVE_FIRMWARE_INFO_CALLBACKS,
         worker::DiagnosticWorkerRoute::MxCreativeFirmwareInfo,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn mx_creative_single_key_paint_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
+    worker::DiagnosticAllowlist::new_for_route(
+        &MX_CREATIVE_SINGLE_KEY_PAINT_CALLBACKS,
+        worker::DiagnosticWorkerRoute::MxCreativeSingleKeyPaint,
     )
     .map_err(|error| error.to_string())
 }

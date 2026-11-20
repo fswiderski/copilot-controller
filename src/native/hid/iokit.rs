@@ -610,6 +610,13 @@ impl IoKitHid {
         Ok(Self { capability })
     }
 
+    #[cfg(feature = "mx-creative-hid")]
+    pub(super) fn new_for_mx_creative_single_key_paint() -> Result<Self, HidError> {
+        let capability = crate::native::windows_worker::single_key_paint_hid_worker_capability()
+            .ok_or(HidError::Unavailable(UnavailableReason::UnsupervisedAccess))?;
+        Ok(Self { capability })
+    }
+
     fn authorize(&self) -> Result<(), HidError> {
         if self.capability.valid() {
             Ok(())
@@ -867,6 +874,15 @@ impl HidTransport for MacTransport {
         })
     }
 
+    fn write_mx_creative_display_report(&mut self, report: &[u8]) -> Result<usize, HidError> {
+        output_mx_creative_display_report(&self.capability, report, |id, bytes| {
+            // The capability is checked immediately before this synchronous FFI.
+            unsafe {
+                IOHIDDeviceSetReport(self.dev.0, 1, id, bytes.as_ptr(), bytes.len() as CFIndex)
+            }
+        })
+    }
+
     fn read(&mut self, out: &mut [u8], timeout: Duration) -> Result<usize, HidError> {
         if !self.capability.valid() {
             return Err(HidError::Unavailable(UnavailableReason::UnsupervisedAccess));
@@ -915,18 +931,55 @@ fn output_report(
     report: &[u8],
     set_report: impl FnOnce(CFIndex, &[u8]) -> IOReturn,
 ) -> Result<usize, HidError> {
+    output_report_bounded(capability, report, MAX_REPORT_LEN, set_report)
+}
+
+fn output_mx_creative_display_report(
+    capability: &crate::native::windows_worker::HidWorkerCapability,
+    report: &[u8],
+    set_report: impl FnOnce(CFIndex, &[u8]) -> IOReturn,
+) -> Result<usize, HidError> {
+    if report.len() != MX_CREATIVE_DISPLAY_REPORT_LEN
+        || report.first().copied() != Some(MX_CREATIVE_DISPLAY_REPORT_ID)
+    {
+        return Err(HidError::InvalidArgument(
+            ArgumentError::ReportExceedsDevice,
+        ));
+    }
+    output_report_bounded(
+        capability,
+        report,
+        MX_CREATIVE_DISPLAY_REPORT_LEN,
+        set_report,
+    )
+}
+
+fn output_report_bounded(
+    capability: &crate::native::windows_worker::HidWorkerCapability,
+    report: &[u8],
+    max_len: usize,
+    set_report: impl FnOnce(CFIndex, &[u8]) -> IOReturn,
+) -> Result<usize, HidError> {
     if !capability.valid() {
         return Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite));
     }
     let Some(&id) = report.first() else {
         return Err(HidError::InvalidArgument(ArgumentError::EmptyReport));
     };
-    if report.len() > MAX_REPORT_LEN {
+    if report.len() > max_len {
         return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
     }
+    write_output_report_with(set_report, report, id)
+}
+
+fn write_output_report_with(
+    set_report: impl FnOnce(CFIndex, &[u8]) -> IOReturn,
+    report: &[u8],
+    report_id: u8,
+) -> Result<usize, HidError> {
     // IOKit includes numbered IDs in the report but not the synthetic zero ID.
-    let bytes = if id == 0 { &report[1..] } else { report };
-    let result = set_report(CFIndex::from(id), bytes);
+    let bytes = if report_id == 0 { &report[1..] } else { report };
+    let result = set_report(CFIndex::from(report_id), bytes);
     if result != 0 {
         return Err(HidError::Os {
             op: HidOp::Write,
@@ -943,6 +996,15 @@ pub(crate) fn fixture_output(
     set_report: impl FnOnce(isize, &[u8]) -> i32,
 ) -> Result<usize, HidError> {
     output_report(capability, report, set_report)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_output_mx_creative_display(
+    capability: &crate::native::windows_worker::HidWorkerCapability,
+    report: &[u8],
+    set_report: impl FnOnce(isize, &[u8]) -> i32,
+) -> Result<usize, HidError> {
+    output_mx_creative_display_report(capability, report, set_report)
 }
 
 #[cfg(test)]

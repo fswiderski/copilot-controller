@@ -322,6 +322,7 @@ fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
     assert!(display_info_hid_worker_capability().is_none());
     assert!(display_route_hid_worker_capability().is_none());
     assert!(firmware_info_hid_worker_capability().is_none());
+    assert!(single_key_paint_hid_worker_capability().is_none());
     assert!(review_hid_worker_capability().is_none());
     assert!(ct_worker_capability().is_none());
     assert!(worker_health().is_err());
@@ -350,6 +351,10 @@ fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
             "__mx-creative-firmware-info-worker",
             crate::cli::mx_creative_firmware_info_allowlist().unwrap(),
         ),
+        (
+            "__mx-creative-single-key-paint-worker",
+            crate::cli::mx_creative_single_key_paint_allowlist().unwrap(),
+        ),
     ] {
         let error = super::super::maybe_run_hidden_worker([route], &allowlist)
             .unwrap()
@@ -363,7 +368,11 @@ fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
     .unwrap_err();
     assert_eq!(review.kind, Kind::Containment);
 
-    #[cfg(any(feature = "micro-hid", feature = "akp03-hid"))]
+    #[cfg(any(
+        feature = "micro-hid",
+        feature = "akp03-hid",
+        feature = "mx-creative-hid"
+    ))]
     assert!(matches!(
         crate::native::hid::native_backend(),
         Err(crate::native::hid::HidError::Unavailable(
@@ -401,6 +410,13 @@ fn macos_mx_creative_request_gets_live_read_authority_without_health_field() {
         Ok(ScopeAuthority::MxCreativeFirmwareInfo)
     );
     assert_eq!(
+        request_authority(&DiagnosticRequest {
+            kind: "mx_creative_single_key_paint".into(),
+            payload: Value::Null,
+        }),
+        Ok(ScopeAuthority::MxCreativeSingleKeyPaint)
+    );
+    assert_eq!(
         validate_platform_request(&DiagnosticRequest {
             kind: "mx_creative_display_route".into(),
             payload: Value::Null,
@@ -413,6 +429,13 @@ fn macos_mx_creative_request_gets_live_read_authority_without_health_field() {
             payload: serde_json::json!({}),
         }),
         Ok(Duration::from_secs(22))
+    );
+    assert_eq!(
+        validate_platform_request(&DiagnosticRequest {
+            kind: "mx_creative_single_key_paint".into(),
+            payload: Value::Null,
+        }),
+        Ok(Duration::from_secs(14))
     );
     assert_eq!(
         validate_platform_request(&DiagnosticRequest {
@@ -579,7 +602,11 @@ fn macos_write_capability_is_scoped_health_denied_and_native_output_uses_the_gat
         let _live = WorkerScope::enter(ScopeAuthority::HidLive).unwrap();
         capability = hid_worker_capability().unwrap();
         assert!(capability.valid());
-        #[cfg(any(feature = "micro-hid", feature = "akp03-hid"))]
+        #[cfg(any(
+            feature = "micro-hid",
+            feature = "akp03-hid",
+            feature = "mx-creative-hid"
+        ))]
         {
             // Constructor and fake SetReport only; never enumerate/open IOKit.
             assert!(crate::native::hid::native_backend().is_ok());
@@ -593,6 +620,52 @@ fn macos_write_capability_is_scoped_health_denied_and_native_output_uses_the_gat
                     .unwrap();
                 assert_eq!(written, report.len());
             }
+            #[cfg(feature = "mx-creative-hid")]
+            {
+                let display_report = vec![0x14; 4095];
+                let written = crate::native::hid::fixture_output_mx_creative_display(
+                    &capability,
+                    &display_report,
+                    |id, bytes| {
+                        assert_eq!(id, 0x14);
+                        assert_eq!(bytes, &display_report);
+                        0
+                    },
+                )
+                .unwrap();
+                assert_eq!(written, display_report.len());
+                assert_eq!(
+                    crate::native::hid::fixture_output(&capability, &display_report, |_, _| 0),
+                    Err(crate::native::hid::HidError::InvalidArgument(
+                        crate::native::hid::ArgumentError::ReportTooLarge
+                    ))
+                );
+
+                let mut wrong_id = display_report.clone();
+                wrong_id[0] = 0x13;
+                assert_eq!(
+                    crate::native::hid::fixture_output_mx_creative_display(
+                        &capability,
+                        &wrong_id,
+                        |_, _| panic!("invalid id must fail before write")
+                    ),
+                    Err(crate::native::hid::HidError::InvalidArgument(
+                        crate::native::hid::ArgumentError::ReportExceedsDevice
+                    ))
+                );
+
+                let short = vec![0x14; 4094];
+                assert_eq!(
+                    crate::native::hid::fixture_output_mx_creative_display(
+                        &capability,
+                        &short,
+                        |_, _| panic!("invalid length must fail before write")
+                    ),
+                    Err(crate::native::hid::HidError::InvalidArgument(
+                        crate::native::hid::ArgumentError::ReportExceedsDevice
+                    ))
+                );
+            }
         }
     }
     assert!(!capability.valid());
@@ -604,11 +677,26 @@ fn macos_write_capability_is_scoped_health_denied_and_native_output_uses_the_gat
             "a later request must not revive the old capability"
         );
     }
-    #[cfg(any(feature = "micro-hid", feature = "akp03-hid"))]
+    #[cfg(any(
+        feature = "micro-hid",
+        feature = "akp03-hid",
+        feature = "mx-creative-hid"
+    ))]
     assert_eq!(
         crate::native::hid::fixture_output(&capability, &[6; 64], |_, _| panic!(
             "unscoped native write"
         )),
+        Err(crate::native::hid::HidError::Unavailable(
+            crate::native::hid::UnavailableReason::UnsupervisedWrite
+        )),
+    );
+    #[cfg(feature = "mx-creative-hid")]
+    assert_eq!(
+        crate::native::hid::fixture_output_mx_creative_display(
+            &capability,
+            &[0x14; 4095],
+            |_, _| panic!("unscoped native display write")
+        ),
         Err(crate::native::hid::HidError::Unavailable(
             crate::native::hid::UnavailableReason::UnsupervisedWrite
         )),

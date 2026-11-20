@@ -30,6 +30,10 @@ fn main() -> ExitCode {
         argument == windows_worker::MX_CREATIVE_FIRMWARE_INFO_HIDDEN_WORKER_ARGUMENT
     }) {
         cli::mx_creative_firmware_info_allowlist()
+    } else if args.first().is_some_and(|argument| {
+        argument == windows_worker::MX_CREATIVE_SINGLE_KEY_PAINT_HIDDEN_WORKER_ARGUMENT
+    }) {
+        cli::mx_creative_single_key_paint_allowlist()
     } else if args
         .first()
         .is_some_and(|argument| argument == windows_worker::MX_CREATIVE_HIDDEN_WORKER_ARGUMENT)

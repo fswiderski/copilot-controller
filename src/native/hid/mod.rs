@@ -57,6 +57,17 @@ mod iokit;
 ))]
 pub(crate) use iokit::fixture_output;
 #[cfg(all(
+    test,
+    any(
+        feature = "akp03-hid",
+        feature = "micro-hid",
+        feature = "mx-creative-hid"
+    ),
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+pub(crate) use iokit::fixture_output_mx_creative_display;
+#[cfg(all(
     any(
         feature = "akp03-hid",
         feature = "micro-hid",
@@ -90,6 +101,12 @@ pub const MAX_REPORT_LEN: usize = 1025;
 /// Largest original HID report descriptor accepted by the evidence boundary.
 pub const MAX_REPORT_DESCRIPTOR_LEN: usize = 1024;
 const MAX_DEVICE_OUTPUT_REPORT_LEN: usize = 4095;
+/// Pinned report id for the single dedicated MX Creative display output path.
+pub(crate) const MX_CREATIVE_DISPLAY_REPORT_ID: u8 = 0x14;
+/// Dedicated size for that one large display frame, kept separate from
+/// [`MAX_REPORT_LEN`] so the ordinary [`HidTransport::write`] cap of 1025 stays
+/// unchanged for every other write path.
+pub(crate) const MX_CREATIVE_DISPLAY_REPORT_LEN: usize = MAX_DEVICE_OUTPUT_REPORT_LEN;
 /// Largest number of descriptors a single enumeration may return.
 pub const MAX_ENUMERATED_DEVICES: usize = 64;
 /// Longest accepted read timeout.
@@ -396,11 +413,23 @@ pub(crate) enum MxCreativeDisplayReply {
     HidppError(u8),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MxCreativeSingleKeyPaintReply {
+    FeatureIndex(u8),
+    KeepAliveRange { minimum_ms: u16, maximum_ms: u16 },
+    Acknowledged,
+    HidppError(u8),
+}
+
 pub(crate) struct MxCreativeDisplayInfoBackend {
     inner: Box<dyn HidBackend>,
 }
 
 pub(crate) struct MxCreativeDisplayRouteBackend {
+    inner: Box<dyn HidBackend>,
+}
+
+pub(crate) struct MxCreativeSingleKeyPaintBackend {
     inner: Box<dyn HidBackend>,
 }
 
@@ -425,6 +454,35 @@ impl MxCreativeDisplayRouteBackend {
         descriptor: &HidDescriptor,
     ) -> Result<OutputRouteOpenProof, HidError> {
         self.inner.open_route_probe(descriptor)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_backend(inner: Box<dyn HidBackend>) -> Self {
+        Self { inner }
+    }
+}
+
+impl MxCreativeSingleKeyPaintBackend {
+    pub(crate) fn enumerate(
+        &self,
+        matcher: &HidMatcher,
+        limit: usize,
+    ) -> Result<Vec<HidDescriptor>, HidError> {
+        enumerate(self.inner.as_ref(), matcher, limit)
+    }
+
+    pub(crate) fn original_report_descriptor_evidence(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> Result<ReportDescriptorEvidence, HidError> {
+        self.inner.original_report_descriptor_evidence(descriptor)
+    }
+
+    pub(crate) fn open(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> Result<MxCreativeSingleKeyPaintDevice, HidError> {
+        MxCreativeSingleKeyPaintDevice::open(self.inner.as_ref(), descriptor)
     }
 
     #[cfg(test)]
@@ -463,6 +521,10 @@ impl MxCreativeDisplayInfoBackend {
 }
 
 pub(crate) struct MxCreativeDisplayInfoDevice {
+    inner: MxCreativeHidppDevice,
+}
+
+pub(crate) struct MxCreativeSingleKeyPaintDevice {
     inner: MxCreativeHidppDevice,
 }
 
@@ -551,6 +613,27 @@ impl MxCreativeHidppDevice {
         parameters: [u8; 2],
         timeout: Duration,
     ) -> Result<Result<[u8; 16], u8>, HidError> {
+        self.query_with_mode(feature_index, function, parameters, timeout, false)
+    }
+
+    fn query_strict(
+        &mut self,
+        feature_index: u8,
+        function: u8,
+        parameters: [u8; 2],
+        timeout: Duration,
+    ) -> Result<Result<[u8; 16], u8>, HidError> {
+        self.query_with_mode(feature_index, function, parameters, timeout, true)
+    }
+
+    fn query_with_mode(
+        &mut self,
+        feature_index: u8,
+        function: u8,
+        parameters: [u8; 2],
+        timeout: Duration,
+        strict: bool,
+    ) -> Result<Result<[u8; 16], u8>, HidError> {
         if timeout.is_zero() || timeout > Duration::from_secs(2) {
             return Err(HidError::InvalidArgument(ArgumentError::TimeoutTooLarge));
         }
@@ -590,6 +673,11 @@ impl MxCreativeHidppDevice {
             }
             if buffer[2] == 0xff {
                 if buffer[4] & 0x0f != software_id {
+                    if strict {
+                        return Err(HidError::Protocol(
+                            "unexpected MX display HID++ error software ID",
+                        ));
+                    }
                     continue;
                 }
                 if buffer[3] != feature_index || buffer[4] >> 4 != function {
@@ -600,6 +688,11 @@ impl MxCreativeHidppDevice {
                 return Ok(Err(buffer[5]));
             }
             if buffer[3] & 0x0f != software_id {
+                if strict {
+                    return Err(HidError::Protocol(
+                        "unexpected MX display response software ID",
+                    ));
+                }
                 continue;
             }
             if buffer[2] != feature_index || buffer[3] >> 4 != function {
@@ -699,6 +792,91 @@ impl MxCreativeDisplayInfoDevice {
     }
 }
 
+impl MxCreativeSingleKeyPaintDevice {
+    const DISPLAY_REPORT_ID: u8 = MX_CREATIVE_DISPLAY_REPORT_ID;
+    const DISPLAY_REPORT_LEN: usize = MX_CREATIVE_DISPLAY_REPORT_LEN;
+
+    fn open(backend: &dyn HidBackend, descriptor: &HidDescriptor) -> Result<Self, HidError> {
+        if descriptor.max_output_report_len < Self::DISPLAY_REPORT_LEN {
+            return Err(HidError::InvalidArgument(
+                ArgumentError::ReportExceedsDevice,
+            ));
+        }
+        Ok(Self {
+            inner: MxCreativeHidppDevice::open(backend, descriptor)?,
+        })
+    }
+
+    pub(crate) fn report_descriptor(&mut self) -> Result<Vec<u8>, HidError> {
+        self.inner.report_descriptor()
+    }
+
+    pub(crate) fn query_keepalive_feature(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<MxCreativeSingleKeyPaintReply, HidError> {
+        match self.inner.query_strict(0, 0, [0, 0x08], timeout)? {
+            Err(code) => Ok(MxCreativeSingleKeyPaintReply::HidppError(code)),
+            Ok(payload) => Ok(MxCreativeSingleKeyPaintReply::FeatureIndex(payload[0])),
+        }
+    }
+
+    pub(crate) fn query_keepalive_range(
+        &mut self,
+        feature_index: u8,
+        timeout: Duration,
+    ) -> Result<MxCreativeSingleKeyPaintReply, HidError> {
+        if !(1..=0xfe).contains(&feature_index) {
+            return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
+        }
+        match self.inner.query_strict(feature_index, 0, [0, 0], timeout)? {
+            Err(code) => Ok(MxCreativeSingleKeyPaintReply::HidppError(code)),
+            Ok(payload) => Ok(MxCreativeSingleKeyPaintReply::KeepAliveRange {
+                minimum_ms: u16::from_be_bytes([payload[0], payload[1]]),
+                maximum_ms: u16::from_be_bytes([payload[2], payload[3]]),
+            }),
+        }
+    }
+
+    pub(crate) fn activate_keepalive(
+        &mut self,
+        feature_index: u8,
+        requested_ms: u16,
+        timeout: Duration,
+    ) -> Result<MxCreativeSingleKeyPaintReply, HidError> {
+        if !(1..=0xfe).contains(&feature_index) || requested_ms == 0 {
+            return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
+        }
+        match self
+            .inner
+            .query_strict(feature_index, 1, requested_ms.to_be_bytes(), timeout)?
+        {
+            Err(code) => Ok(MxCreativeSingleKeyPaintReply::HidppError(code)),
+            Ok(_) => Ok(MxCreativeSingleKeyPaintReply::Acknowledged),
+        }
+    }
+
+    pub(crate) fn write_display_report(&mut self, report: &[u8]) -> Result<(), HidError> {
+        if report.len() != Self::DISPLAY_REPORT_LEN
+            || report.first().copied() != Some(Self::DISPLAY_REPORT_ID)
+        {
+            return Err(HidError::InvalidArgument(
+                ArgumentError::ReportExceedsDevice,
+            ));
+        }
+        let written = self
+            .inner
+            .transport
+            .write_mx_creative_display_report(report)?;
+        if written != report.len() {
+            return Err(HidError::Protocol(
+                "MX single-key paint report was not fully written",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl MxCreativeFirmwareInfoDevice {
     fn open(backend: &dyn HidBackend, descriptor: &HidDescriptor) -> Result<Self, HidError> {
         Ok(Self {
@@ -787,6 +965,17 @@ pub trait HidTransport {
         true
     }
     fn write(&mut self, report: &[u8]) -> Result<usize, HidError>;
+    /// Dedicated path for the single pinned MX Creative display output report.
+    ///
+    /// It is bounded separately from [`write`](Self::write) (whose cap stays at
+    /// [`MAX_REPORT_LEN`]) so the one 4095-byte display frame can be delivered
+    /// without widening every other write. It accepts only the pinned report id
+    /// and exact length, and fails closed by default so no transport gains a
+    /// generic large-write path implicitly.
+    fn write_mx_creative_display_report(&mut self, report: &[u8]) -> Result<usize, HidError> {
+        let _ = report;
+        Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite))
+    }
     /// Reads one input report into `buf`, returning its length.
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, HidError>;
     /// Returns original HID report-descriptor bytes only when provided by the OS.
@@ -1105,6 +1294,33 @@ pub(crate) fn mx_creative_display_route_backend() -> Result<MxCreativeDisplayRou
     {
         Ok(MxCreativeDisplayRouteBackend {
             inner: Box::new(iokit::IoKitHid::new_for_mx_creative_display_route()?),
+        })
+    }
+    #[cfg(not(feature = "mx-creative-hid"))]
+    {
+        Err(HidError::Unavailable(UnavailableReason::FeatureDisabled))
+    }
+    #[cfg(all(
+        feature = "mx-creative-hid",
+        not(all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    {
+        Err(HidError::Unavailable(
+            UnavailableReason::UnsupportedPlatform,
+        ))
+    }
+}
+
+pub(crate) fn mx_creative_single_key_paint_backend()
+-> Result<MxCreativeSingleKeyPaintBackend, HidError> {
+    #[cfg(all(
+        feature = "mx-creative-hid",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    {
+        Ok(MxCreativeSingleKeyPaintBackend {
+            inner: Box::new(iokit::IoKitHid::new_for_mx_creative_single_key_paint()?),
         })
     }
     #[cfg(not(feature = "mx-creative-hid"))]

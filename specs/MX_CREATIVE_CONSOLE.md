@@ -273,3 +273,30 @@ The only physical procedure authorized by this command is:
 The route proves a structural address and nonexclusive IOKit open/close only.
 It does not send report `0x14`, does not send an image, and does not establish
 display command readiness, physical painting safety, or hardware qualification.
+
+## 8. Narrow one-key volatile paint experiment
+
+`mx-creative-single-key-paint --confirm-write-single-key` is a dedicated,
+single-purpose route for one reversible write trial on key 1 only.
+
+- no payload/file/path input is accepted;
+- no brightness/config/diversion/reset/firmware writes are available;
+- no refresh/cancel frame is sent;
+- only one KeepAlive function-1 activation (`3000 ms`) and one report `0x14`
+  image frame are sent, then the worker waits exactly `2000 ms` and exits;
+- transport keeps the ordinary output-report cap at `1025`; only the dedicated
+  single-key display write seam admits the exact `0x14` frame length `4095`;
+- rollback is natural expiry only.
+
+The worker discovers KeepAlive feature/index/range at runtime, requires the
+range to remain bounded in `500..=10000`, and fails if `3000` is out of range.
+The image is internally generated as a solid cyan JPEG (`jpeg-encoder`) and
+must remain `<4075` bytes. The fixed conservative key-1 rectangle is
+`x=23,y=6,w=118,h=118` with provenance recorded as public secondary
+reverse-engineering evidence (medium confidence).
+
+The parent orchestration must show a visible readiness prompt immediately before
+execution using an `ask_user` form with a 3-2-1 audible countdown and explicit
+operator confirmation. Native `SetReport` success is transport evidence only,
+not visual proof. Brightness is treated as opaque (currently observed as `0`),
+so visual outcome may be inconclusive.
