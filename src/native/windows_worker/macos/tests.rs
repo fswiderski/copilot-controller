@@ -417,6 +417,13 @@ fn macos_mx_creative_request_gets_live_read_authority_without_health_field() {
         Ok(ScopeAuthority::MxCreativeSingleKeyPaint)
     );
     assert_eq!(
+        request_authority(&DiagnosticRequest {
+            kind: "mx_creative_colored_icon_test".into(),
+            payload: Value::Null,
+        }),
+        Ok(ScopeAuthority::MxCreativeSingleKeyPaint)
+    );
+    assert_eq!(
         validate_platform_request(&DiagnosticRequest {
             kind: "mx_creative_display_route".into(),
             payload: Value::Null,
@@ -436,6 +443,13 @@ fn macos_mx_creative_request_gets_live_read_authority_without_health_field() {
             payload: Value::Null,
         }),
         Ok(crate::devices::mx_creative::single_key_paint::BUDGET)
+    );
+    assert_eq!(
+        validate_platform_request(&DiagnosticRequest {
+            kind: "mx_creative_colored_icon_test".into(),
+            payload: Value::Null,
+        }),
+        Ok(crate::devices::mx_creative::colored_icon_test::BUDGET)
     );
     assert_eq!(
         validate_platform_request(&DiagnosticRequest {

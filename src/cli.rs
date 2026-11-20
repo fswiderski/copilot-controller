@@ -3,6 +3,7 @@
 
 mod ct_probe;
 mod hid_probe;
+mod mx_creative_colored_icon_test;
 mod mx_creative_display_info;
 mod mx_creative_display_route;
 mod mx_creative_evidence;
@@ -75,6 +76,8 @@ Usage: copilot-controller <command>
            (bounded read-only HID++ firmware metadata; no options)
   mx-creative-single-key-paint --confirm-rainbow-nine-keys
            (keys 1..9 sequential volatile rainbow paint, one key at a time)
+  mx-creative-colored-icon-test --confirm-seven-colored-icons
+           (paint original fesReview icons on keys 1..7; keys 8..9 untouched)
   review-input --device mx-creative (private foreground action stream)
 
 All previews and probes are not ready or hardware-qualified. Native probes use
@@ -135,6 +138,7 @@ pub enum Command {
     MxCreativeDisplayRoute,
     MxCreativeFirmwareInfo(mx_creative::firmware_info::Options),
     MxCreativeSingleKeyPaint,
+    MxCreativeColoredIconTest,
     ReviewInput,
     FirmwarePlan {
         image: PathBuf,
@@ -306,6 +310,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             return mx_creative_single_key_paint::parse(args)
                 .map(|()| Command::MxCreativeSingleKeyPaint);
         }
+        "mx-creative-colored-icon-test" => {
+            return mx_creative_colored_icon_test::parse(args)
+                .map(|()| Command::MxCreativeColoredIconTest);
+        }
         "review-input" => return review_input::parse(args).map(|()| Command::ReviewInput),
         "micro-probe" | "akp03-probe" => {
             return hid_probe::parse(args, name == "micro-probe").map(|options| match options {
@@ -437,6 +445,7 @@ fn capabilities() -> Value {
         "mx_creative_display_route_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
         "mx_creative_firmware_info_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
         "mx_creative_single_key_paint_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
+        "mx_creative_colored_icon_test_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
         "firmware_execution_available": false,
         "runtime_owner_acquired": false,
         "state_store_api_available": cfg!(any(target_os = "linux", target_os = "macos")),
@@ -624,6 +633,7 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
         Command::MxCreativeDisplayRoute => mx_creative_display_route::execute(),
         Command::MxCreativeFirmwareInfo(options) => mx_creative_firmware_info::execute(options),
         Command::MxCreativeSingleKeyPaint => mx_creative_single_key_paint::execute(),
+        Command::MxCreativeColoredIconTest => mx_creative_colored_icon_test::execute(),
         Command::ReviewInput => Err("review-input requires the streaming CLI route".into()),
         Command::FirmwarePlan { image, tool } => {
             if !cfg!(feature = "micro-firmware") {
@@ -688,11 +698,16 @@ static MX_CREATIVE_FIRMWARE_INFO_CALLBACKS: [worker::DiagnosticCallback; 1] =
         mx_creative_firmware_info::callback,
     )];
 
-static MX_CREATIVE_SINGLE_KEY_PAINT_CALLBACKS: [worker::DiagnosticCallback; 1] =
-    [worker::DiagnosticCallback::new(
+static MX_CREATIVE_KEYPAD_PAINT_CALLBACKS: [worker::DiagnosticCallback; 2] = [
+    worker::DiagnosticCallback::new(
         mx_creative_single_key_paint::KIND,
         mx_creative_single_key_paint::callback,
-    )];
+    ),
+    worker::DiagnosticCallback::new(
+        mx_creative_colored_icon_test::KIND,
+        mx_creative_colored_icon_test::callback,
+    ),
+];
 
 static DIAGNOSTIC_CALLBACKS: [worker::DiagnosticCallback; 4] = [
     worker::DiagnosticCallback::new("health", health_callback),
@@ -759,7 +774,7 @@ pub fn mx_creative_firmware_info_allowlist() -> Result<worker::DiagnosticAllowli
 
 pub fn mx_creative_single_key_paint_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
     worker::DiagnosticAllowlist::new_for_route(
-        &MX_CREATIVE_SINGLE_KEY_PAINT_CALLBACKS,
+        &MX_CREATIVE_KEYPAD_PAINT_CALLBACKS,
         worker::DiagnosticWorkerRoute::MxCreativeSingleKeyPaint,
     )
     .map_err(|error| error.to_string())

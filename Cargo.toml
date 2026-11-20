@@ -54,6 +54,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
 ryu = "1"
 jpeg-encoder = "0.6"
+png = "0.17"
 
 [dev-dependencies]
 jpeg-decoder = "0.3"

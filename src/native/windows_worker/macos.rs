@@ -286,6 +286,9 @@ pub(super) fn validate_platform_request(request: &DiagnosticRequest) -> Result<D
         "mx_creative_single_key_paint" if request.payload.is_null() => {
             Ok(crate::devices::mx_creative::single_key_paint::BUDGET)
         }
+        "mx_creative_colored_icon_test" if request.payload.is_null() => {
+            Ok(crate::devices::mx_creative::colored_icon_test::BUDGET)
+        }
         "ct_serial_probe" => {
             let options: crate::devices::ct::probe::Options =
                 serde_json::from_value(request.payload.clone())
@@ -310,6 +313,7 @@ fn request_authority(request: &DiagnosticRequest) -> Result<ScopeAuthority, Kind
         "mx_creative_display_route" => Ok(ScopeAuthority::MxCreativeDisplayRoute),
         "mx_creative_firmware_info" => Ok(ScopeAuthority::MxCreativeFirmwareInfo),
         "mx_creative_single_key_paint" => Ok(ScopeAuthority::MxCreativeSingleKeyPaint),
+        "mx_creative_colored_icon_test" => Ok(ScopeAuthority::MxCreativeSingleKeyPaint),
         "micro_hid_probe" | "akp03_hid_probe" => {
             if request.payload["health_check"] == false {
                 Ok(ScopeAuthority::HidLive)

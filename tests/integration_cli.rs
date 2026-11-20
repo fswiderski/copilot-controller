@@ -303,6 +303,8 @@ fn hid_cli_validation_and_hidden_routes_never_emit_success_output() {
         vec!["akp03-probe", "--initialize", "--health-check"],
         vec!["akp03-probe", "--query"],
         vec!["akp03-probe", "--path", "anything"],
+        vec!["mx-creative-colored-icon-test"],
+        vec!["mx-creative-colored-icon-test", "--wrong"],
         vec!["__akp03-worker"],
         vec!["__akp03-worker", "extra"],
         vec!["__akp03-worker", "--capture-ms", "0"],
@@ -322,6 +324,7 @@ fn hid_cli_validation_and_hidden_routes_never_emit_success_output() {
     assert!(text.contains("--exclusive-check"));
     assert!(text.contains("--backlight-test <rgb|red|green|blue|gray|brightness>"));
     assert!(text.contains("akp03-probe"));
+    assert!(text.contains("mx-creative-colored-icon-test --confirm-seven-colored-icons"));
     assert!(!text.contains("__probe-worker"));
     assert!(!text.contains("__akp03-worker"));
     #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]

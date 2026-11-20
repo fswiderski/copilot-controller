@@ -305,3 +305,36 @@ execution using an `ask_user` form with a 3-2-1 audible countdown and explicit
 operator confirmation. Native `SetReport` success is transport evidence only,
 not visual proof. Brightness is treated as opaque (currently observed as `0`),
 so visual outcome may be inconclusive.
+
+## 9. Seven-key colored icon trial (keys 1..7 only)
+
+`mx-creative-colored-icon-test --confirm-seven-colored-icons` is a dedicated
+volatile icon trial that paints only keys `1..7` and intentionally leaves keys
+`8..9` untouched.
+
+- no payload/file/path input is accepted;
+- no brightness/config/diversion/reset/firmware writes are available;
+- no refresh/cancel frame is sent;
+- key rectangles use the same public 3x3 grid (`x=23+col*158`, `y=6+row*158`,
+  `size=118`) and select keys `1..7` only;
+- icon sources are pinned to original fesReview SVG provenance:
+  repository `fes/fesReview-mx-icons`, commit `7a339c9`,
+  root `assets/mx-keypad-icons`, mapped exactly as:
+  key1 `play-pause.svg`, key2 `first-frame.svg`, key3 `last-frame.svg`,
+  key4 `back-1s.svg`, key5 `forward-1s.svg`, key6 `screenshot.svg`,
+  key7 `dictate.svg`;
+- compile-time embedded PNG artifacts (derived from those SVGs) are decoded and
+  re-encoded in Rust to bounded baseline JPEG payloads (`<4075` bytes each),
+  requiring JFIF APP0 and rejecting APP1/Exif metadata;
+- KeepAlive remains fixed at `3000 ms`, activated once before paint and
+  refreshed at `2000 ms` and `4000 ms` to hold the static test for `5000 ms`;
+- after the hold, KeepAlive is allowed to expire naturally (`2200 ms` additional
+  wait after the 5-second hold), yielding approximately a 7-second total trial
+  from first activation to rollback.
+
+Total paint output is exactly `7` report-`0x14` writes; total KeepAlive
+activations are exactly `3`. This route and the nine-key rainbow route share
+the same bounded display-paint worker authority (`MxCreativeSingleKeyPaint`)
+and transport seam; only command kind, frame content, and timing differ.
+Native `SetReport` success remains transport evidence only, not visual
+confirmation.
