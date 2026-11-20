@@ -4,8 +4,11 @@ use serde_json::{Value, json};
 
 use crate::{
     devices::mx_creative::single_key_paint::{
-        BUDGET, HOLD_MS, KEEPALIVE_FEATURE_ID, KEEPALIVE_MS, KEY1_CYAN_RGB, KEY1_H, KEY1_W, KEY1_X,
-        KEY1_Y, OUTPUT_REPORT_ID, OUTPUT_REPORT_LEN, ParentReadinessForm, Result,
+        BUDGET, COLORS_PER_KEY, DWELL_MICROS, EXPECTED_HIDPP_REPORTS,
+        EXPECTED_KEEPALIVE_ACTIVATIONS, HOLD_MS, KEEPALIVE_FEATURE_ID, KEEPALIVE_MS,
+        KEEPALIVE_REFRESH_EVERY_COLORS, KEY_COUNT, KEY1_H, KEY1_W, OUTPUT_REPORT_ID,
+        OUTPUT_REPORT_LEN, ParentReadinessForm, Result, TOTAL_PAINT_FRAMES, expected_key_rects,
+        expected_palette_last_rgb, expected_palette_rgb_sha256,
     },
     native::windows_worker as worker,
 };
@@ -16,9 +19,10 @@ pub(super) const KIND: &str = "mx_creative_single_key_paint";
 
 pub(super) fn parse(args: &[String]) -> std::result::Result<(), String> {
     match args {
-        [arg] if arg == "--confirm-write-single-key" => Ok(()),
+        [arg] if arg == "--confirm-rainbow-nine-keys" => Ok(()),
         _ => Err(
-            "single-key paint requires exactly --confirm-write-single-key and no extra args".into(),
+            "single-key paint requires exactly --confirm-rainbow-nine-keys and no extra args"
+                .into(),
         ),
     }
 }
@@ -86,16 +90,24 @@ fn failure(error: &str) -> Result {
         semantic_read_only: false,
         parent_readiness_form: ParentReadinessForm::default(),
         operator_warning: "Visible confirmation is required before physical execution. Native SetReport success is not visual proof.".into(),
-        rollback: "No refresh or cancel is sent. Natural KeepAlive expiry rolls back this one-key experiment.".into(),
+        rollback: "No refresh or cancel is sent. Natural KeepAlive expiry between keys (and after key 9) rolls back each volatile frame.".into(),
         visual_result_may_be_inconclusive: true,
         no_brightness_or_config_writes: true,
         hold_ms: HOLD_MS,
+        dwell_micros: DWELL_MICROS,
+        keys_expected: KEY_COUNT,
+        colors_per_key: COLORS_PER_KEY,
         error: Some(error.into()),
         ..Result::default()
     }
 }
 
 pub(super) fn valid_result(result: &Result) -> bool {
+    let expected_hidpp_reports = EXPECTED_HIDPP_REPORTS;
+    let expected_hid_output_reports = expected_hidpp_reports + TOTAL_PAINT_FRAMES;
+    let expected_hid_output_bytes = 20 * usize::from(expected_hidpp_reports)
+        + OUTPUT_REPORT_LEN * usize::from(TOTAL_PAINT_FRAMES);
+
     let basics = result.schema == 1
         && !result.semantic_read_only
         && !result.command_ready
@@ -105,16 +117,21 @@ pub(super) fn valid_result(result: &Result) -> bool {
         && result.visual_result_may_be_inconclusive
         && result.retries == 0
         && result.hold_ms == HOLD_MS
-        && result.elapsed_ms <= 14_000
+        && result.dwell_micros == DWELL_MICROS
+        && result.keys_expected == KEY_COUNT
+        && result.colors_per_key == COLORS_PER_KEY
+        && result.keys_completed <= KEY_COUNT
+        && result.elapsed_ms <= 100_000
         && result.error.as_deref().is_none_or(valid_error)
         && valid_readiness(&result.parent_readiness_form)
         && result.operator_warning
             == "Visible confirmation is required before physical execution. Native SetReport success is not visual proof."
         && result.rollback
-            == "No refresh or cancel is sent. Natural KeepAlive expiry rolls back this one-key experiment.";
+            == "No refresh or cancel is sent. Natural KeepAlive expiry between keys (and after key 9) rolls back each volatile frame.";
     if !basics {
         return false;
     }
+
     if let Some(device) = &result.device
         && (device.vendor_id != 0x046d
             || device.product_id != 0xc354
@@ -128,6 +145,7 @@ pub(super) fn valid_result(result: &Result) -> bool {
     {
         return false;
     }
+
     if result.probe_succeeded {
         let Some(keepalive) = &result.keepalive else {
             return false;
@@ -143,52 +161,67 @@ pub(super) fn valid_result(result: &Result) -> bool {
             && (keepalive.minimum_ms..=keepalive.maximum_ms).contains(&KEEPALIVE_MS)
             && keepalive.requested_ms == KEEPALIVE_MS
             && keepalive.activation_accepted
+            && keepalive.activation_reports_sent == EXPECTED_KEEPALIVE_ACTIVATIONS
+            && keepalive.refresh_every_colors == KEEPALIVE_REFRESH_EVERY_COLORS
             && keepalive.hidpp_error.is_none()
             && paint.report_id == OUTPUT_REPORT_ID
             && paint.total_report_len == OUTPUT_REPORT_LEN
             && paint.header_len == 20
             && paint.frame_function_swid == 0x21
             && paint.frame_sequence == 0xe0
-            && paint.rect.x == KEY1_X
-            && paint.rect.y == KEY1_Y
-            && paint.rect.width == KEY1_W
-            && paint.rect.height == KEY1_H
             && paint.rect_provenance.source
-                == "public secondary reverse-engineering report with conservative key-1 grid"
-            && paint.rect_provenance.confidence == "medium"
-            && paint.color_rgb == KEY1_CYAN_RGB
+                == "public secondary reverse-engineering grid x=23+col*158,y=6+row*158,size=118; key-1 physically confirmed"
+            && paint.rect_provenance.confidence == "mixed"
+            && paint.key_rects == expected_key_rects()
+            && paint.keys_expected == KEY_COUNT
+            && paint.keys_completed == KEY_COUNT
+            && paint.colors_per_key == COLORS_PER_KEY
+            && paint.total_frames_expected == TOTAL_PAINT_FRAMES
+            && paint.total_frames_sent == TOTAL_PAINT_FRAMES
+            && paint.dwell_micros == DWELL_MICROS
+            && paint.rollback_wait_ms == HOLD_MS
+            && paint.rollback_waits_completed == KEY_COUNT
+            && paint.palette_rgb_sha256 == expected_palette_rgb_sha256()
+            && paint.first_color_rgb == [255, 0, 0]
+            && paint.last_color_rgb == expected_palette_last_rgb()
+            && paint.color_rgb == expected_palette_last_rgb()
             && paint.jpeg_len < 4075
             && valid_digest(&paint.jpeg_sha256)
             && !paint.image_ack_expected
-            && result.hidpp_reports_sent == 3
-            && result.paint_reports_sent == 1
-            && result.hid_output_reports_sent == 4
-            && result.hid_output_bytes_sent == 20 * 3 + OUTPUT_REPORT_LEN
+            && result.hidpp_reports_sent == expected_hidpp_reports
+            && result.paint_reports_sent == TOTAL_PAINT_FRAMES
+            && result.hid_output_reports_sent == expected_hid_output_reports
+            && result.hid_output_bytes_sent == expected_hid_output_bytes
+            && result.keys_completed == KEY_COUNT
             && result.hold_wait_completed
             && result.device.is_some()
     } else {
-        result.hidpp_reports_sent <= 3
-            && result.paint_reports_sent <= 1
-            && result.hid_output_reports_sent <= 4
-            && result.hid_output_bytes_sent <= 20 * 3 + OUTPUT_REPORT_LEN
+        result.hidpp_reports_sent <= expected_hidpp_reports
+            && result.paint_reports_sent <= TOTAL_PAINT_FRAMES
+            && result.hid_output_reports_sent <= expected_hid_output_reports
+            && result.hid_output_bytes_sent <= expected_hid_output_bytes
+            && result.keys_completed <= KEY_COUNT
             && result
                 .keepalive
                 .as_ref()
                 .is_none_or(|keepalive| keepalive.requested_ms == KEEPALIVE_MS)
-            && result
-                .paint
-                .as_ref()
-                .is_none_or(|paint| paint.rect.width == KEY1_W && paint.rect.height == KEY1_H)
+            && result.paint.as_ref().is_none_or(|paint| {
+                paint.rect.width == KEY1_W
+                    && paint.rect.height == KEY1_H
+                    && paint.colors_per_key == COLORS_PER_KEY
+                    && paint.total_frames_expected == TOTAL_PAINT_FRAMES
+                    && paint.dwell_micros == DWELL_MICROS
+            })
     }
 }
 
 fn valid_readiness(form: &ParentReadinessForm) -> bool {
     form.required
         && form.tool == "ask_user"
-        && form.title == "MX Creative single-key paint readiness"
-        && form.accept_phrase == "READY_SINGLE_KEY_PAINT"
+        && form.title == "MX Creative 9-key rainbow paint readiness"
+        && form.accept_phrase == "READY_RAINBOW_NINE_KEYS"
         && form.countdown_seconds == 3
-        && form.command == "mx-creative-single-key-paint --confirm-write-single-key"
+        && form.command == "mx-creative-single-key-paint --confirm-rainbow-nine-keys"
         && !form.prompt.is_empty()
 }
 
@@ -214,6 +247,10 @@ fn valid_error(error: &str) -> bool {
             | "unexpected keepalive range response"
             | "keepalive activation rejected"
             | "unexpected keepalive activation response"
+            | "keepalive feature index changed across key cycles"
+            | "keepalive timeout range changed across key cycles"
+            | "derived key rectangle outside 480x480 bounds"
+            | "rainbow palette generation produced duplicate RGB colors"
             | "invalid JPEG payload length"
             | "JPEG markers are invalid"
             | "HID transport unavailable"
@@ -275,9 +312,9 @@ mod tests {
 
     #[test]
     fn parser_requires_exact_confirmation_flag() {
-        assert!(parse(&["--confirm-write-single-key".into()]).is_ok());
+        assert!(parse(&["--confirm-rainbow-nine-keys".into()]).is_ok());
         assert!(parse(&[]).is_err());
-        assert!(parse(&["--confirm-write-single-key".into(), "--extra".into()]).is_err());
+        assert!(parse(&["--confirm-rainbow-nine-keys".into(), "--extra".into()]).is_err());
     }
 
     #[test]
@@ -306,6 +343,8 @@ mod tests {
                 maximum_ms: 10_000,
                 requested_ms: KEEPALIVE_MS,
                 activation_accepted: true,
+                activation_reports_sent: EXPECTED_KEEPALIVE_ACTIVATIONS,
+                refresh_every_colors: KEEPALIVE_REFRESH_EVERY_COLORS,
                 hidpp_error: None,
             }),
             paint: Some(crate::devices::mx_creative::single_key_paint::PaintEvidence {
@@ -314,41 +353,51 @@ mod tests {
                 header_len: 20,
                 frame_function_swid: 0x21,
                 frame_sequence: 0xe0,
-                rect: crate::devices::mx_creative::single_key_paint::PaintRect {
-                    x: KEY1_X,
-                    y: KEY1_Y,
-                    width: KEY1_W,
-                    height: KEY1_H,
-                },
+                rect: expected_key_rects()[8],
                 rect_provenance: crate::devices::mx_creative::single_key_paint::PublicProvenance {
-                    source:
-                        "public secondary reverse-engineering report with conservative key-1 grid"
-                            .into(),
-                    confidence: "medium".into(),
+                    source: "public secondary reverse-engineering grid x=23+col*158,y=6+row*158,size=118; key-1 physically confirmed".into(),
+                    confidence: "mixed".into(),
                 },
-                color_rgb: KEY1_CYAN_RGB,
+                color_rgb: expected_palette_last_rgb(),
                 jpeg_len: 768,
                 jpeg_sha256: "0".repeat(64),
                 image_ack_expected: false,
+                keys_expected: KEY_COUNT,
+                keys_completed: KEY_COUNT,
+                colors_per_key: COLORS_PER_KEY,
+                total_frames_expected: TOTAL_PAINT_FRAMES,
+                total_frames_sent: TOTAL_PAINT_FRAMES,
+                dwell_micros: DWELL_MICROS,
+                rollback_wait_ms: HOLD_MS,
+                rollback_waits_completed: KEY_COUNT,
+                key_rects: expected_key_rects(),
+                palette_rgb_sha256: expected_palette_rgb_sha256(),
+                first_color_rgb: [255, 0, 0],
+                last_color_rgb: expected_palette_last_rgb(),
             }),
             parent_readiness_form: ParentReadinessForm::default(),
             operator_warning: "Visible confirmation is required before physical execution. Native SetReport success is not visual proof.".into(),
             rollback:
-                "No refresh or cancel is sent. Natural KeepAlive expiry rolls back this one-key experiment.".into(),
+                "No refresh or cancel is sent. Natural KeepAlive expiry between keys (and after key 9) rolls back each volatile frame.".into(),
             visual_result_may_be_inconclusive: true,
             no_brightness_or_config_writes: true,
-            hidpp_reports_sent: 3,
-            paint_reports_sent: 1,
-            hid_output_reports_sent: 4,
-            hid_output_bytes_sent: 20 * 3 + OUTPUT_REPORT_LEN,
+            hidpp_reports_sent: EXPECTED_HIDPP_REPORTS,
+            paint_reports_sent: TOTAL_PAINT_FRAMES,
+            hid_output_reports_sent: EXPECTED_HIDPP_REPORTS + TOTAL_PAINT_FRAMES,
+            hid_output_bytes_sent: 20 * usize::from(EXPECTED_HIDPP_REPORTS)
+                + OUTPUT_REPORT_LEN * usize::from(TOTAL_PAINT_FRAMES),
             retries: 0,
             hold_ms: HOLD_MS,
             hold_wait_completed: true,
-            elapsed_ms: 2500,
+            dwell_micros: DWELL_MICROS,
+            keys_expected: KEY_COUNT,
+            keys_completed: KEY_COUNT,
+            colors_per_key: COLORS_PER_KEY,
+            elapsed_ms: 70_000,
             error: None,
         };
         assert!(valid_result(&success));
-        success.hid_output_reports_sent = 5;
+        success.hid_output_reports_sent += 1;
         assert!(!valid_result(&success));
     }
 }

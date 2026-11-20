@@ -73,8 +73,8 @@ Usage: copilot-controller <command>
            (no-paint output-route proof; no report or image is sent)
   mx-creative-firmware-info
            (bounded read-only HID++ firmware metadata; no options)
-  mx-creative-single-key-paint --confirm-write-single-key
-           (one key-1 volatile paint write, fixed 2s hold, natural rollback)
+  mx-creative-single-key-paint --confirm-rainbow-nine-keys
+           (keys 1..9 sequential volatile rainbow paint, one key at a time)
   review-input --device mx-creative (private foreground action stream)
 
 All previews and probes are not ready or hardware-qualified. Native probes use

@@ -283,7 +283,9 @@ pub(super) fn validate_platform_request(request: &DiagnosticRequest) -> Result<D
             options.validate().map_err(|_| Kind::InvalidRequest)?;
             Ok(options.budget())
         }
-        "mx_creative_single_key_paint" if request.payload.is_null() => Ok(Duration::from_secs(14)),
+        "mx_creative_single_key_paint" if request.payload.is_null() => {
+            Ok(crate::devices::mx_creative::single_key_paint::BUDGET)
+        }
         "ct_serial_probe" => {
             let options: crate::devices::ct::probe::Options =
                 serde_json::from_value(request.payload.clone())

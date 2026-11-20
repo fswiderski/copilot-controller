@@ -274,26 +274,31 @@ The route proves a structural address and nonexclusive IOKit open/close only.
 It does not send report `0x14`, does not send an image, and does not establish
 display command readiness, physical painting safety, or hardware qualification.
 
-## 8. Narrow one-key volatile paint experiment
+## 8. Bounded nine-key volatile rainbow qualification
 
-`mx-creative-single-key-paint --confirm-write-single-key` is a dedicated,
-single-purpose route for one reversible write trial on key 1 only.
+`mx-creative-single-key-paint --confirm-rainbow-nine-keys` is a dedicated,
+single-purpose route for a bounded reversible trial across keys 1..9.
 
 - no payload/file/path input is accepted;
 - no brightness/config/diversion/reset/firmware writes are available;
 - no refresh/cancel frame is sent;
-- only one KeepAlive function-1 activation (`3000 ms`) and one report `0x14`
-  image frame are sent, then the worker waits exactly `2000 ms` and exits;
+- key rectangles are derived from public secondary grid evidence
+  `x=23+col*158`, `y=6+row*158`, `size=118` for keys `1..9` (3x3);
+- each key receives exactly 64 HSV-wheel colors (`h=0..359`, `s=1`, `v=1`)
+  at `62_500 µs` dwell (~16 colors/s), with JPEG generated at runtime;
+- KeepAlive timeout remains fixed at `3000 ms` and is refreshed every 16 colors
+  (about once per second) while a key is active;
+- after each key, KeepAlive is allowed to expire naturally (`3200 ms` wait)
+  before advancing, so only one key is active at a time;
 - transport keeps the ordinary output-report cap at `1025`; only the dedicated
   single-key display write seam admits the exact `0x14` frame length `4095`;
 - rollback is natural expiry only.
 
 The worker discovers KeepAlive feature/index/range at runtime, requires the
 range to remain bounded in `500..=10000`, and fails if `3000` is out of range.
-The image is internally generated as a solid cyan JPEG (`jpeg-encoder`) and
-must remain `<4075` bytes. The fixed conservative key-1 rectangle is
-`x=23,y=6,w=118,h=118` with provenance recorded as public secondary
-reverse-engineering evidence (medium confidence).
+Total paint output is exactly `9 * 64 = 576` report `0x14` writes; total
+KeepAlive function-1 activations are exactly `36` (four per key).
+Each generated JPEG must remain `<4075` bytes.
 
 The parent orchestration must show a visible readiness prompt immediately before
 execution using an `ask_user` form with a 3-2-1 audible countdown and explicit

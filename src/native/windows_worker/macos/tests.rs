@@ -435,7 +435,7 @@ fn macos_mx_creative_request_gets_live_read_authority_without_health_field() {
             kind: "mx_creative_single_key_paint".into(),
             payload: Value::Null,
         }),
-        Ok(Duration::from_secs(14))
+        Ok(crate::devices::mx_creative::single_key_paint::BUDGET)
     );
     assert_eq!(
         validate_platform_request(&DiagnosticRequest {
