@@ -155,8 +155,9 @@ controller action mapping is authorized by this block.
 
 ## 6. Semantic display-information discovery
 
-`mx-creative-display-info` is a separate, finite worker route. It is available
-only on macOS ARM64 with `mx-creative-hid`, and it selects exactly the USB
+`mx-creative-display-info` is a separate, finite worker route. Its default form
+is metadata-only. It is available only on macOS ARM64 with
+`mx-creative-hid`, and it selects exactly the USB
 `046d:c354` `MX Creative Keypad` vendor collection at
 `0xff43/0x1a02`, LocationID `0x02110000`. The complete original report
 descriptor must match the pinned 140-byte SHA-256 value in section 2 before
@@ -182,13 +183,36 @@ are sent; the fifth KeepAlive range request is sent only when discovery
 returned a nonzero index. The whole worker budget is below 30 seconds.
 
 Despite the read-only semantics, HID++ requests physically send output reports.
-This command therefore must not be described as passive capture. It never
+The default command therefore must not be described as passive capture. It never
 sends a SET, function 1 to KeepAlive, key diversion, keepalive activation,
 brightness change, LCD output, firmware request, reset, or arbitrary frame.
-In particular, brightness, display-state/geometry, and controls metadata
-functions are not queried: their feature-table presence is reported while
-their `metadata_status` remains explicitly `*_not_authorized`. These GET
-contracts require a separately corroborated protocol and authorization review.
+Brightness, display-state/geometry, and controls metadata functions remain
+unqueried in the default form: their feature-table presence is reported while
+their `metadata_status` remains explicitly `*_not_authorized`.
+
+An explicitly authorized fixed check is available as:
+
+```sh
+target/release/copilot-controller mx-creative-display-info \
+  --hold-keepalive-ms 1000
+```
+
+Only the exact value `1000` is accepted. In this form, a discovered `0x8040`
+index permits the documented read-only function 0 (`get info`) and function 1
+(`get brightness`) requests. The current brightness is returned as a bounded
+numeric value, while the information payload is represented only by SHA-256;
+raw replies are not exported. Display geometry and controls metadata remain
+unqueried.
+
+If the discovered KeepAlive range includes 1000 ms, the command sends exactly
+one function-1 KeepAlive request containing big-endian `0x03e8`, waits one
+second after its correlated acceptance, and sends no refresh or cancellation.
+The timeout is left to expire naturally. The result records only acceptance and
+idle-wait completion; it does not claim image state, persistence, or an
+immediate device release. This fixed volatile check is the only additional
+non-GET request, and `semantic_read_only` is false for the explicit mode even
+if the feature is absent or rejects the request. No image, diversion, pixel,
+firmware, brightness-set, reset, or arbitrary HID frame is available.
 
 JSON output includes only device numeric identity and descriptor digest,
 feature IDs/indices/status, HID++ error codes, the KeepAlive millisecond range,
@@ -206,5 +230,7 @@ cargo build --release --features mx-creative-hid
 target/release/copilot-controller mx-creative-display-info
 ```
 
-This phase does not qualify the display path and provides no direct-write icon
-authority. It supplies a fail-safe feature map and KeepAlive range only.
+The default phase does not qualify the display path and provides no
+direct-write icon authority. It supplies a fail-safe feature map and KeepAlive
+range only. The opt-in check adds only bounded brightness GETs and one
+fixed-duration KeepAlive timeout activation.

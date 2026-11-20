@@ -10,6 +10,7 @@ use crate::native::hid::{
 };
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+pub const KEEPALIVE_CHECK_MS: u16 = 1000;
 const FEATURES: [Feature; 4] = [
     Feature::KeepAlive,
     Feature::Brightness,
@@ -19,15 +20,28 @@ const FEATURES: [Feature; 4] = [
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Options {}
+pub struct Options {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_check_ms: Option<u16>,
+}
 
 impl Options {
     pub fn validate(&self) -> std::result::Result<(), &'static str> {
+        if self
+            .keepalive_check_ms
+            .is_some_and(|duration| duration != KEEPALIVE_CHECK_MS)
+        {
+            return Err("keepalive_check_ms must be exactly 1000");
+        }
         Ok(())
     }
 
     pub fn budget(&self) -> Duration {
-        Duration::from_secs(16)
+        if self.keepalive_check_ms.is_some() {
+            Duration::from_secs(18)
+        } else {
+            Duration::from_secs(16)
+        }
     }
 }
 
@@ -61,6 +75,28 @@ pub struct KeepAliveRange {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct BrightnessGet {
+    pub feature_id: u16,
+    pub feature_index: u8,
+    pub current: Option<u8>,
+    pub info_sha256: Option<String>,
+    pub info_hidpp_error: Option<u8>,
+    pub current_hidpp_error: Option<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeepAliveCheck {
+    pub feature_id: u16,
+    pub feature_index: u8,
+    pub requested_ms: u16,
+    pub activation_accepted: bool,
+    pub idle_wait_completed: bool,
+    pub hidpp_error: Option<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceInfo {
     pub vendor_id: u16,
     pub product_id: u16,
@@ -83,33 +119,36 @@ pub struct Result {
     pub device: Option<DeviceInfo>,
     pub features: Vec<FeatureInfo>,
     pub keepalive_range: Option<KeepAliveRange>,
+    pub brightness_get: Option<BrightnessGet>,
+    pub keepalive_check: Option<KeepAliveCheck>,
     pub requests_sent: u8,
     pub elapsed_ms: u64,
     pub error: Option<String>,
 }
 
 pub(crate) fn run(backend: &MxCreativeDisplayInfoBackend, options: Options) -> Result {
+    let semantic_read_only = options.keepalive_check_ms.is_none();
     if let Err(error) = options.validate() {
-        return failure(error);
+        return failure(error, semantic_read_only);
     }
     let started = Instant::now();
     let descriptor = match probe::select_display_keypad(backend) {
         Ok(descriptor) => descriptor,
-        Err(error) => return failure(error),
+        Err(error) => return failure(error, semantic_read_only),
     };
     if descriptor.bus != Some(HidBus::Usb) {
-        return failure("keypad identity or transport mismatch");
+        return failure("keypad identity or transport mismatch", semantic_read_only);
     }
     let mut transport = match backend.open(&descriptor) {
         Ok(transport) => transport,
-        Err(error) => return failure(error.to_string()),
+        Err(error) => return failure(error.to_string(), semantic_read_only),
     };
     let reopened_hash = match transport.report_descriptor() {
         Ok(bytes) => digest(&bytes),
-        Err(error) => return failure(error.to_string()),
+        Err(error) => return failure(error.to_string(), semantic_read_only),
     };
     if reopened_hash != probe::KEYPAD_DESCRIPTOR_SHA256 {
-        return failure("keypad reopened descriptor mismatch");
+        return failure("keypad reopened descriptor mismatch", semantic_read_only);
     }
     let device = DeviceInfo {
         vendor_id: descriptor.identity.vendor_id,
@@ -123,7 +162,7 @@ pub(crate) fn run(backend: &MxCreativeDisplayInfoBackend, options: Options) -> R
     };
     let mut result = Result {
         schema: 1,
-        semantic_read_only: true,
+        semantic_read_only,
         device: Some(device),
         ..Result::default()
     };
@@ -166,17 +205,111 @@ pub(crate) fn run(backend: &MxCreativeDisplayInfoBackend, options: Options) -> R
                 result.features[0].metadata_status = "hidpp_error".into();
                 result.features[0].hidpp_error = Some(code);
             }
-            Ok(Reply::FeatureIndex(_)) => {
+            Ok(
+                Reply::FeatureIndex(_)
+                | Reply::BrightnessInfo(_)
+                | Reply::BrightnessCurrent(_)
+                | Reply::Acknowledged,
+            ) => {
                 result.error = Some("unexpected KeepAlive response".into());
             }
             Err(error) => result.error = Some(error.to_string()),
         }
     }
 
+    if options.keepalive_check_ms.is_some() {
+        run_checked_getters(&mut transport, &mut result);
+    }
+
     result.requests_sent = transport.requests_sent();
     result.elapsed_ms = elapsed(started);
     result.probe_succeeded = result.error.is_none();
     result
+}
+
+fn run_checked_getters(
+    transport: &mut crate::native::hid::MxCreativeDisplayInfoDevice,
+    result: &mut Result,
+) {
+    if result.error.is_some() {
+        return;
+    }
+    let brightness_index = result
+        .features
+        .iter()
+        .find(|feature| {
+            feature.id == Feature::Brightness.id() && feature.status == FeatureStatus::Present
+        })
+        .and_then(|feature| feature.feature_index);
+    if let Some(feature_index) = brightness_index {
+        if let Some(feature) = result
+            .features
+            .iter_mut()
+            .find(|feature| feature.id == Feature::Brightness.id())
+        {
+            feature.metadata_status = "brightness_get_check_authorized".into();
+        }
+        let mut brightness = BrightnessGet {
+            feature_id: Feature::Brightness.id(),
+            feature_index,
+            current: None,
+            info_sha256: None,
+            info_hidpp_error: None,
+            current_hidpp_error: None,
+        };
+        match transport.query(Query::BrightnessInfo { feature_index }, QUERY_TIMEOUT) {
+            Ok(Reply::BrightnessInfo(payload)) => {
+                brightness.info_sha256 = Some(digest(&payload));
+            }
+            Ok(Reply::HidppError(code)) => brightness.info_hidpp_error = Some(code),
+            Ok(_) => result.error = Some("unexpected brightness info response".into()),
+            Err(error) => result.error = Some(error.to_string()),
+        }
+        if result.error.is_none() {
+            match transport.query(Query::BrightnessCurrent { feature_index }, QUERY_TIMEOUT) {
+                Ok(Reply::BrightnessCurrent(current)) => brightness.current = Some(current),
+                Ok(Reply::HidppError(code)) => brightness.current_hidpp_error = Some(code),
+                Ok(_) => result.error = Some("unexpected brightness GET response".into()),
+                Err(error) => result.error = Some(error.to_string()),
+            }
+        }
+        result.brightness_get = Some(brightness);
+    }
+
+    if result.error.is_some() {
+        return;
+    }
+    let keepalive = result
+        .keepalive_range
+        .as_ref()
+        .filter(|range| (range.minimum_ms..=range.maximum_ms).contains(&KEEPALIVE_CHECK_MS));
+    let Some(range) = keepalive else {
+        return;
+    };
+    let mut check = KeepAliveCheck {
+        feature_id: Feature::KeepAlive.id(),
+        feature_index: range.feature_index,
+        requested_ms: KEEPALIVE_CHECK_MS,
+        activation_accepted: false,
+        idle_wait_completed: false,
+        hidpp_error: None,
+    };
+    match transport.query(
+        Query::KeepAliveCheck {
+            feature_index: range.feature_index,
+        },
+        QUERY_TIMEOUT,
+    ) {
+        Ok(Reply::Acknowledged) => {
+            check.activation_accepted = true;
+            std::thread::sleep(Duration::from_millis(u64::from(KEEPALIVE_CHECK_MS)));
+            check.idle_wait_completed = true;
+        }
+        Ok(Reply::HidppError(code)) => check.hidpp_error = Some(code),
+        Ok(_) => result.error = Some("unexpected KeepAlive check response".into()),
+        Err(error) => result.error = Some(error.to_string()),
+    }
+    result.keepalive_check = Some(check);
 }
 
 fn feature_result(feature: Feature, reply: Reply) -> FeatureInfo {
@@ -219,7 +352,10 @@ fn feature_result(feature: Feature, reply: Reply) -> FeatureInfo {
             hidpp_error: Some(code),
             metadata_status: "query_error".into(),
         },
-        Reply::KeepAliveRange { .. } => FeatureInfo {
+        Reply::KeepAliveRange { .. }
+        | Reply::BrightnessInfo(_)
+        | Reply::BrightnessCurrent(_)
+        | Reply::Acknowledged => FeatureInfo {
             id: feature.id(),
             status: FeatureStatus::QueryError,
             feature_index: None,
@@ -229,10 +365,10 @@ fn feature_result(feature: Feature, reply: Reply) -> FeatureInfo {
     }
 }
 
-fn failure(error: impl Into<String>) -> Result {
+fn failure(error: impl Into<String>, semantic_read_only: bool) -> Result {
     Result {
         schema: 1,
-        semantic_read_only: true,
+        semantic_read_only,
         error: Some(error.into()),
         ..Result::default()
     }
@@ -296,6 +432,18 @@ mod tests {
 
     fn reply(software_id: u8, feature_index: u8, parameters: &[u8]) -> Vec<u8> {
         let mut reply = vec![0x11, 0xff, feature_index, software_id];
+        reply.extend_from_slice(parameters);
+        reply.resize(20, 0);
+        reply
+    }
+
+    fn function_reply(
+        software_id: u8,
+        feature_index: u8,
+        function: u8,
+        parameters: &[u8],
+    ) -> Vec<u8> {
+        let mut reply = vec![0x11, 0xff, feature_index, (function << 4) | software_id];
         reply.extend_from_slice(parameters);
         reply.resize(20, 0);
         reply
@@ -373,5 +521,64 @@ mod tests {
         assert_eq!(result.requests_sent, 4);
         assert!(result.keepalive_range.is_none());
         assert_eq!(state.borrow().written.len(), 4);
+    }
+
+    #[test]
+    fn explicit_check_sends_only_brightness_getters_and_one_keepalive_timeout() {
+        let backend = FakeBackend::new(vec![descriptor()]);
+        backend.state.borrow_mut().report_descriptor = Some(descriptor_bytes());
+        backend.state.borrow_mut().inputs.extend([
+            reply(1, 0, &[5]),
+            reply(2, 0, &[8]),
+            reply(3, 0, &[7]),
+            reply(4, 0, &[0]),
+            reply(5, 5, &[0x01, 0xf4, 0x27, 0x10]),
+            function_reply(6, 8, 0, &[0x64, 0, 1, 2]),
+            function_reply(7, 8, 1, &[0x2a]),
+            function_reply(8, 5, 1, &[]),
+        ]);
+        let state = backend.state.clone();
+        let query_backend = MxCreativeDisplayInfoBackend::from_test_backend(Box::new(backend));
+        let result = run(
+            &query_backend,
+            Options {
+                keepalive_check_ms: Some(KEEPALIVE_CHECK_MS),
+            },
+        );
+        assert!(result.probe_succeeded, "{result:?}");
+        assert!(!result.semantic_read_only);
+        assert_eq!(result.requests_sent, 8);
+        assert_eq!(result.brightness_get.as_ref().unwrap().current, Some(42));
+        assert!(
+            result
+                .brightness_get
+                .as_ref()
+                .unwrap()
+                .info_sha256
+                .as_deref()
+                .is_some_and(|digest| digest.len() == 64)
+        );
+        assert_eq!(
+            result.keepalive_check,
+            Some(KeepAliveCheck {
+                feature_id: 0x0008,
+                feature_index: 5,
+                requested_ms: 1000,
+                activation_accepted: true,
+                idle_wait_completed: true,
+                hidpp_error: None,
+            })
+        );
+        let frames = state.borrow().written.clone();
+        assert_eq!(frames.len(), 8);
+        assert_eq!(&frames[5][2..6], &[8, 0x06, 0, 0]);
+        assert_eq!(&frames[6][2..6], &[8, 0x17, 0, 0]);
+        assert_eq!(&frames[7][2..6], &[5, 0x18, 0x03, 0xe8]);
+        assert!(frames.iter().all(|frame| {
+            frame[0] == 0x11
+                && frame[1] == 0xff
+                && frame.len() == 20
+                && !(frame[2] != 0 && frame[3] >> 4 == 2 && matches!(frame[2], 5 | 8))
+        }));
     }
 }

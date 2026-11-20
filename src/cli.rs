@@ -64,7 +64,8 @@ Usage: copilot-controller <command>
            [--max-events <1..128>] [--max-received-bytes <256..32768>]
            [--test-pattern] (explicit contained serial diagnostic)
   mx-creative-evidence [--capture-ms <0..30000>] (finite read-only HID evidence)
-  mx-creative-display-info (semantic HID++ GET-only feature discovery)
+  mx-creative-display-info [--hold-keepalive-ms 1000]
+           (default metadata-only; explicit fixed volatile GET/hold check)
   review-input --device mx-creative (private foreground action stream)
 
 All previews and probes are not ready or hardware-qualified. Native probes use

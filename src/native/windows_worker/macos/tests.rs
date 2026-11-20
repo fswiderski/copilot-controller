@@ -377,6 +377,20 @@ fn macos_mx_creative_request_gets_live_read_authority_without_health_field() {
         Ok(ScopeAuthority::MxCreativeDisplayInfo)
     );
     assert_eq!(
+        validate_platform_request(&DiagnosticRequest {
+            kind: "mx_creative_display_info".into(),
+            payload: serde_json::json!({"keepalive_check_ms":1000}),
+        }),
+        Ok(Duration::from_secs(18))
+    );
+    assert_eq!(
+        validate_platform_request(&DiagnosticRequest {
+            kind: "mx_creative_display_info".into(),
+            payload: serde_json::json!({"keepalive_check_ms":999}),
+        }),
+        Err(Kind::InvalidRequest)
+    );
+    assert_eq!(
         request_authority(&DiagnosticRequest {
             kind: "mx_creative_review".into(),
             payload: Value::Null,

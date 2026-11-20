@@ -301,6 +301,55 @@ fn mx_display_query_rejects_wrong_hidpp_error_echo_and_ignores_other_swids() {
 }
 
 #[test]
+fn mx_display_check_frames_are_getters_plus_one_fixed_keepalive_function() {
+    let descriptor = desc(ID, 0xff00, "query-check");
+    let backend = FakeBackend::new(vec![descriptor.clone()]);
+    let mut info = [0; 20];
+    info[..5].copy_from_slice(&[0x11, 0xff, 9, 0x01, 0x64]);
+    let mut current = [0; 20];
+    current[..5].copy_from_slice(&[0x11, 0xff, 9, 0x12, 42]);
+    let mut hold = [0; 20];
+    hold[..4].copy_from_slice(&[0x11, 0xff, 6, 0x13]);
+    backend
+        .state
+        .borrow_mut()
+        .inputs
+        .extend([info.to_vec(), current.to_vec(), hold.to_vec()]);
+    let mut device = MxCreativeDisplayInfoDevice::open(&backend, &descriptor).unwrap();
+    assert_eq!(
+        device.query(
+            MxCreativeDisplayQuery::BrightnessInfo { feature_index: 9 },
+            Duration::from_secs(1)
+        ),
+        Ok(MxCreativeDisplayReply::BrightnessInfo([
+            0x64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ]))
+    );
+    assert_eq!(
+        device.query(
+            MxCreativeDisplayQuery::BrightnessCurrent { feature_index: 9 },
+            Duration::from_secs(1)
+        ),
+        Ok(MxCreativeDisplayReply::BrightnessCurrent(42))
+    );
+    assert_eq!(
+        device.query(
+            MxCreativeDisplayQuery::KeepAliveCheck { feature_index: 6 },
+            Duration::from_secs(1)
+        ),
+        Ok(MxCreativeDisplayReply::Acknowledged)
+    );
+    let writes = backend.state.borrow().written.clone();
+    assert_eq!(
+        writes
+            .iter()
+            .map(|frame| [frame[2], frame[3], frame[4], frame[5]])
+            .collect::<Vec<_>>(),
+        [[9, 0x01, 0, 0], [9, 0x12, 0, 0], [6, 0x13, 0x03, 0xe8]]
+    );
+}
+
+#[test]
 fn write_bounds() {
     let d = desc(ID, 1, "a");
     let b = FakeBackend::new(vec![d.clone()]);

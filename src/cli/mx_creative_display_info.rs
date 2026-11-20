@@ -4,7 +4,8 @@ use serde_json::{Value, json};
 
 use crate::{
     devices::mx_creative::display_info::{
-        FeatureInfo, FeatureStatus, KeepAliveRange, Options, Result,
+        BrightnessGet, FeatureInfo, FeatureStatus, KEEPALIVE_CHECK_MS, KeepAliveCheck,
+        KeepAliveRange, Options, Result,
     },
     native::windows_worker as worker,
 };
@@ -14,10 +15,17 @@ use super::Output;
 pub(super) const KIND: &str = "mx_creative_display_info";
 
 pub(super) fn parse(args: &[String]) -> std::result::Result<Options, String> {
-    if !args.is_empty() {
-        return Err("mx-creative-display-info accepts no arguments".into());
+    if args.is_empty() {
+        return Ok(Options::default());
     }
-    Ok(Options::default())
+    if args.len() != 2 || args[0] != "--hold-keepalive-ms" || args[1] != "1000" {
+        return Err("hold check requires exactly --hold-keepalive-ms 1000".into());
+    }
+    let options = Options {
+        keepalive_check_ms: Some(KEEPALIVE_CHECK_MS),
+    };
+    options.validate().map_err(str::to_owned)?;
+    Ok(options)
 }
 
 pub(super) fn execute(options: Options) -> std::result::Result<Output, String> {
@@ -44,7 +52,7 @@ fn execute_with(
         .map_err(|error| json_string(&json!({"status":"worker_error","error":error})))?;
     let result: Result = serde_json::from_value(response.payload)
         .map_err(|_| worker_error(worker::WorkerErrorKind::Protocol))?;
-    if !valid_result(&result) {
+    if !valid_result(&result, &options) {
         return Err(worker_error(worker::WorkerErrorKind::Protocol));
     }
     let payload = json_string(&result);
@@ -61,7 +69,7 @@ pub(super) fn callback(
     payload: Value,
 ) -> std::result::Result<Value, worker::DiagnosticCallbackError> {
     let object = payload.as_object().ok_or(worker::DiagnosticCallbackError)?;
-    if !object.is_empty() {
+    if !object.is_empty() && !(object.len() == 1 && object.contains_key("keepalive_check_ms")) {
         return Err(worker::DiagnosticCallbackError);
     }
     let options: Options =
@@ -73,35 +81,42 @@ pub(super) fn callback(
     if !cfg!(feature = "mx-creative-hid") {
         return serde_json::to_value(failure(
             "unavailable: device-specific HID feature is disabled",
+            options.keepalive_check_ms.is_none(),
         ))
         .map_err(|_| worker::DiagnosticCallbackError);
     }
     let backend = crate::native::hid::mx_creative_display_info_backend()
         .map_err(|_| worker::DiagnosticCallbackError)?;
-    let result = crate::devices::mx_creative::display_info::run(&backend, options);
-    if !valid_result(&result) {
+    let result = crate::devices::mx_creative::display_info::run(&backend, options.clone());
+    if !valid_result(&result, &options) {
         return Err(worker::DiagnosticCallbackError);
     }
     serde_json::to_value(result).map_err(|_| worker::DiagnosticCallbackError)
 }
 
-fn failure(error: &str) -> Result {
+fn failure(error: &str, semantic_read_only: bool) -> Result {
     Result {
         schema: 1,
-        semantic_read_only: true,
+        semantic_read_only,
         error: Some(error.into()),
         ..Result::default()
     }
 }
 
-pub(super) fn valid_result(result: &Result) -> bool {
+pub(super) fn valid_result(result: &Result, options: &Options) -> bool {
+    let check_authorized = options.keepalive_check_ms.is_some();
     let basics = result.schema == 1
-        && result.semantic_read_only
+        && result.semantic_read_only == !check_authorized
         && !result.command_ready
         && !result.hardware_qualified
         && result.probe_succeeded == result.error.is_none()
-        && result.requests_sent <= 5
-        && result.elapsed_ms <= 16_000
+        && result.requests_sent <= 8
+        && result.elapsed_ms
+            <= if result.semantic_read_only {
+                16_000
+            } else {
+                18_000
+            }
         && result.features.len() <= 4
         && result.error.as_deref().is_none_or(valid_error);
     if !basics {
@@ -123,7 +138,9 @@ pub(super) fn valid_result(result: &Result) -> bool {
     if result.device.is_none()
         && (result.probe_succeeded
             || !result.features.is_empty()
-            || result.keepalive_range.is_some())
+            || result.keepalive_range.is_some()
+            || result.brightness_get.is_some()
+            || result.keepalive_check.is_some())
     {
         return false;
     }
@@ -140,19 +157,118 @@ pub(super) fn valid_result(result: &Result) -> bool {
     {
         return false;
     }
+    if !valid_brightness_get(
+        result.brightness_get.as_ref(),
+        result.features.get(1),
+        check_authorized,
+        result.probe_succeeded,
+    ) || !valid_keepalive_check(
+        result.keepalive_check.as_ref(),
+        result.keepalive_range.as_ref(),
+        result.probe_succeeded,
+    ) {
+        return false;
+    }
     if result.probe_succeeded
-        && (result.features.len() != 4
-            || result.requests_sent
-                != 4 + u8::from(
-                    result
-                        .features
-                        .first()
-                        .is_some_and(|feature| feature.status == FeatureStatus::Present),
-                ))
+        && (result.features.len() != 4 || result.requests_sent != expected_requests(result))
+    {
+        return false;
+    }
+    if result.probe_succeeded
+        && check_authorized
+        && (!valid_required_brightness(result) || !valid_required_keepalive_hold(result))
     {
         return false;
     }
     !result.probe_succeeded || result.device.is_some()
+}
+
+fn expected_requests(result: &Result) -> u8 {
+    let keepalive_range = u8::from(
+        result
+            .features
+            .first()
+            .is_some_and(|feature| feature.status == FeatureStatus::Present),
+    );
+    let brightness_gets = if result.brightness_get.is_some() {
+        2
+    } else {
+        0
+    };
+    let keepalive_check = u8::from(result.keepalive_check.is_some());
+    4 + keepalive_range + brightness_gets + keepalive_check
+}
+
+fn valid_brightness_get(
+    brightness: Option<&BrightnessGet>,
+    feature: Option<&FeatureInfo>,
+    check_authorized: bool,
+    probe_succeeded: bool,
+) -> bool {
+    match (brightness, feature) {
+        (None, _) if !check_authorized => true,
+        (None, Some(feature)) => !probe_succeeded || feature.status != FeatureStatus::Present,
+        (None, None) => !probe_succeeded,
+        (Some(_), _) if !check_authorized => false,
+        (Some(brightness), Some(feature)) => {
+            feature.id == 0x8040
+                && feature.status == FeatureStatus::Present
+                && brightness.feature_id == feature.id
+                && brightness.feature_index == feature.feature_index.unwrap_or(0)
+                && brightness.feature_index != 0
+                && brightness.info_sha256.as_deref().is_none_or(valid_digest)
+                && !(brightness.info_sha256.is_some() && brightness.info_hidpp_error.is_some())
+                && !(brightness.current.is_some() && brightness.current_hidpp_error.is_some())
+                && (!probe_succeeded
+                    || (brightness.info_sha256.is_some() || brightness.info_hidpp_error.is_some())
+                        && (brightness.current.is_some()
+                            || brightness.current_hidpp_error.is_some()))
+        }
+        (Some(_), None) => false,
+    }
+}
+
+fn valid_keepalive_check(
+    check: Option<&KeepAliveCheck>,
+    range: Option<&KeepAliveRange>,
+    probe_succeeded: bool,
+) -> bool {
+    match (check, range) {
+        (None, _) => true,
+        (Some(check), Some(range)) => {
+            check.feature_id == 0x0008
+                && check.feature_index == range.feature_index
+                && check.requested_ms == KEEPALIVE_CHECK_MS
+                && (range.minimum_ms..=range.maximum_ms).contains(&KEEPALIVE_CHECK_MS)
+                && (!probe_succeeded
+                    || if check.activation_accepted {
+                        check.hidpp_error.is_none() && check.idle_wait_completed
+                    } else {
+                        check.hidpp_error.is_some() && !check.idle_wait_completed
+                    })
+        }
+        (Some(_), None) => false,
+    }
+}
+
+fn valid_required_brightness(result: &Result) -> bool {
+    result
+        .features
+        .get(1)
+        .is_none_or(|feature| feature.status != FeatureStatus::Present)
+        || result.brightness_get.is_some()
+}
+
+fn valid_required_keepalive_hold(result: &Result) -> bool {
+    result
+        .keepalive_range
+        .as_ref()
+        .is_none_or(|range| !(range.minimum_ms..=range.maximum_ms).contains(&KEEPALIVE_CHECK_MS))
+        || result.keepalive_check.is_some()
+}
+
+fn valid_digest(digest: &str) -> bool {
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn valid_feature(feature: &FeatureInfo, position: usize) -> bool {
@@ -182,7 +298,10 @@ fn valid_feature(feature: &FeatureInfo, position: usize) -> bool {
                 && ((feature.hidpp_error.is_none() && feature.metadata_status == authorized)
                     || (expected == Feature::KeepAlive
                         && feature.hidpp_error.is_some()
-                        && feature.metadata_status == "hidpp_error"))
+                        && feature.metadata_status == "hidpp_error")
+                    || (expected == Feature::Brightness
+                        && feature.hidpp_error.is_none()
+                        && feature.metadata_status == "brightness_get_check_authorized"))
         }
         FeatureStatus::Absent => {
             feature.feature_index.is_none()
@@ -235,6 +354,9 @@ fn valid_error(error: &str) -> bool {
             | "keypad product name unavailable"
             | "invalid KeepAlive timeout range"
             | "unexpected KeepAlive response"
+            | "unexpected brightness info response"
+            | "unexpected brightness GET response"
+            | "unexpected KeepAlive check response"
             | "HID transport unavailable"
             | "Unavailable(FeatureDisabled)"
             | "Unavailable(UnsupportedPlatform)"
@@ -291,6 +413,15 @@ mod tests {
     #[test]
     fn command_accepts_only_empty_options() {
         assert_eq!(parse(&[]), Ok(Options::default()));
+        assert_eq!(
+            parse(&["--hold-keepalive-ms".into(), "1000".into()]),
+            Ok(Options {
+                keepalive_check_ms: Some(1000)
+            })
+        );
+        assert!(parse(&["--hold-keepalive-ms".into()]).is_err());
+        assert!(parse(&["--hold-keepalive-ms".into(), "500".into()]).is_err());
+        assert!(parse(&["--hold-keepalive-ms".into(), "01000".into()]).is_err());
         assert!(parse(&["--query".into()]).is_err());
         assert!(parse(&["unexpected".into()]).is_err());
     }
@@ -345,11 +476,13 @@ mod tests {
                 },
             ],
             keepalive_range: None,
+            brightness_get: None,
+            keepalive_check: None,
             requests_sent: 4,
             elapsed_ms: 10,
             error: None,
         };
-        assert!(valid_result(&result));
+        assert!(valid_result(&result, &Options::default()));
         let response = DiagnosticResult {
             worker: WorkerIdentity {
                 pid: 1,
@@ -358,8 +491,36 @@ mod tests {
             payload: serde_json::to_value(&result).unwrap(),
         };
         assert!(execute_with(Options::default(), |_, _| Ok(response)).is_ok());
-        let mut invalid = result;
+        let mut invalid = result.clone();
         invalid.features[1].metadata_status = "brightness_current".into();
-        assert!(!valid_result(&invalid));
+        assert!(!valid_result(&invalid, &Options::default()));
+
+        let mut checked = result;
+        let explicit = Options {
+            keepalive_check_ms: Some(1000),
+        };
+        checked.semantic_read_only = false;
+        checked.features[1].metadata_status = "brightness_get_check_authorized".into();
+        checked.brightness_get = Some(BrightnessGet {
+            feature_id: 0x8040,
+            feature_index: 8,
+            current: Some(42),
+            info_sha256: Some("0".repeat(64)),
+            info_hidpp_error: None,
+            current_hidpp_error: None,
+        });
+        checked.requests_sent = 6;
+        assert!(valid_result(&checked, &explicit));
+        let mut missing_hold_authority = checked;
+        missing_hold_authority.semantic_read_only = true;
+        assert!(!valid_result(&missing_hold_authority, &explicit));
+
+        let unavailable = Result {
+            schema: 1,
+            semantic_read_only: false,
+            error: Some("NotFound".into()),
+            ..Result::default()
+        };
+        assert!(valid_result(&unavailable, &explicit));
     }
 }

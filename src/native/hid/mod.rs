@@ -339,12 +339,18 @@ impl MxCreativeDisplayFeature {
 pub(crate) enum MxCreativeDisplayQuery {
     Discover(MxCreativeDisplayFeature),
     KeepAliveRange { feature_index: u8 },
+    BrightnessInfo { feature_index: u8 },
+    BrightnessCurrent { feature_index: u8 },
+    KeepAliveCheck { feature_index: u8 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MxCreativeDisplayReply {
     FeatureIndex(u8),
     KeepAliveRange { minimum_ms: u16, maximum_ms: u16 },
+    BrightnessInfo([u8; 16]),
+    BrightnessCurrent(u8),
+    Acknowledged,
     HidppError(u8),
 }
 
@@ -455,6 +461,26 @@ impl MxCreativeDisplayInfoDevice {
             MxCreativeDisplayQuery::KeepAliveRange { .. } => {
                 return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
             }
+            MxCreativeDisplayQuery::BrightnessInfo { feature_index }
+                if (1..=0xfe).contains(&feature_index) =>
+            {
+                (feature_index, 0, [0, 0])
+            }
+            MxCreativeDisplayQuery::BrightnessCurrent { feature_index }
+                if (1..=0xfe).contains(&feature_index) =>
+            {
+                (feature_index, 1, [0, 0])
+            }
+            MxCreativeDisplayQuery::KeepAliveCheck { feature_index }
+                if (1..=0xfe).contains(&feature_index) =>
+            {
+                (feature_index, 1, 1000u16.to_be_bytes())
+            }
+            MxCreativeDisplayQuery::BrightnessInfo { .. }
+            | MxCreativeDisplayQuery::BrightnessCurrent { .. }
+            | MxCreativeDisplayQuery::KeepAliveCheck { .. } => {
+                return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
+            }
         };
         let frame = display_query_frame(feature_index, function, software_id, parameters);
         if self.transport.write(&frame)? != frame.len() {
@@ -511,6 +537,19 @@ impl MxCreativeDisplayInfoDevice {
                         minimum_ms: u16::from_be_bytes([bytes[0], bytes[1]]),
                         maximum_ms: u16::from_be_bytes([bytes[2], bytes[3]]),
                     })
+                }
+                MxCreativeDisplayQuery::BrightnessInfo { .. } => {
+                    Ok(MxCreativeDisplayReply::BrightnessInfo(
+                        buffer[4..20]
+                            .try_into()
+                            .expect("fixed HID++ response payload length"),
+                    ))
+                }
+                MxCreativeDisplayQuery::BrightnessCurrent { .. } => {
+                    Ok(MxCreativeDisplayReply::BrightnessCurrent(buffer[4]))
+                }
+                MxCreativeDisplayQuery::KeepAliveCheck { .. } => {
+                    Ok(MxCreativeDisplayReply::Acknowledged)
                 }
             };
         }
