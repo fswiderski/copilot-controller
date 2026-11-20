@@ -101,6 +101,72 @@ hardware evidence policy.
 - Input declarations do not imply all declared controls are normalized. In particular, encoder press is declared but not emitted by the strict adapter.
 - Firmware input artifacts are **local, explicitly supplied files** with exact sizes and digests. Downloads, arbitrary substituted tools, implicit upgrades, and automatic recovery are not part of this contract.
 
+## 1A. MX Creative firmware information (read-only)
+
+`mx-creative-firmware-info` is a separate, no-option macOS ARM64 route with its
+own worker authority. It opens only the exactly qualified MX Creative keypad
+vendor collection. It discovers HID++ feature `0x0003` through IRoot and, when
+present, permits only function 0 (entity count) and function 1 (metadata for
+indices `0..count`). Counts above `8` fail closed before any per-entity query.
+No DFU, serial-number, keep-alive, display, or configuration function is exposed
+through this route.
+
+The function-0 count is byte 0; the unit identifier and remaining identity
+bytes are intentionally discarded. The function-1 fields used here are: entity
+type at byte 0, a three-byte prefix at 1..3, packed-BCD version at 4..5,
+packed-BCD build at 6..7, and active bit 0 at byte 8. Printable prefixes are
+exposed as `name`, with trailing zero padding removed; every prefix is retained
+only as bounded lower-case
+`name_hex`, so an entity-specific non-ASCII value cannot be mistaken for a
+missing firmware record. Bytes 9..15 are
+transport-specific and are intentionally discarded; this probe does not
+interpret them as a PID. Invalid BCD rejects the result.
+
+The protocol mapping is independently represented by:
+
+- Logitech's public HID++ 2.0 overview, including IRoot feature resolution:
+  <https://github.com/Logitech/cpg-docs/blob/master/hidpp20/README.rst>
+- the public HID++ 2.0 field reference for feature `0x0003`:
+  <https://github.com/oliver124810/logiops-wiki/blob/master/HIDPP--2.0.md>
+- the public `0x0003` textual reference documenting the 16-byte response:
+  <https://openlogi.org/hidpp/features/x0003-device-information>
+- Logitech's indexed *HIDPP 2.0 Specifications Draft 2012-06-04*, whose text
+  identifies IFirmwareInfo/GetEntityCount/GetFwInfo without requiring a binary
+  implementation or firmware download:
+  <https://lekensteyn.nl/files/logitech/logitech_hidpp_2.0_specification_draft_2012-06-04.pdf>
+
+Protocol field extraction and bounds are covered by synthetic transport tests.
+No implementation source was copied or fetched for this mapping.
+
+As of 2026-11-19, Logitech's official current MX Creative Console support
+page advertises no firmware download, its What's New page records Options+
+feature/fix releases rather than device firmware identifiers, and the latest
+official Options+ release notes are `3.0.1024647`/`3.0.1024648` dated
+2026-11-17. The public listing of Logitech's official `fw_updates` repository
+contains no path matching the keypad PID `C354` or MX Creative Console.
+Consequently those sources do not establish a latest public MX Creative
+firmware version for a comparison. A physical read alone is recorded firmware
+state, not proof that an update is needed; an update requires an authoritative
+model/transport/version release notice or an Options+ update offer.
+
+On 2026-11-19, one explicitly invoked macOS ARM64 read-only run found HID++
+feature `0x0003` at index `2`, four firmware entities, and completed six GET
+requests. The active main entity was `U1 66.00 B0017`. The other returned
+entities were inactive `BL2 20.00 B0017` bootloader, inactive type-11
+`IM 01.00 B0017`, and inactive `HW 00.00 B0000` hardware. No unit identifier,
+serial capability, transport-specific suffix, or firmware image was retained.
+Because the official public sources above provide no C354/MX Creative latest
+firmware identifier, this observation does **not** establish that an update is
+available or needed. Do not update from that evidence; use a future official
+Options+ update offer or authoritative release notice as the decision gate.
+
+Sources for that release search:
+
+- <https://support.logi.com/hc/en-in/articles/24727171760791-MX-Creative-Console>
+- <https://support.logi.com/hc/en-in/articles/36716539691031-What-s-new-MX-Creative-Console>
+- <https://marketplace.logi.com/releasenotes/optionsplus/en>
+- <https://github.com/Logitech/fw_updates>
+
 ## 2. Device identity and ownership
 
 ### 2.1 Constants and timing

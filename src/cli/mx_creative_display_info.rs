@@ -289,6 +289,7 @@ fn valid_feature(feature: &FeatureInfo, position: usize) -> bool {
     match feature.status {
         FeatureStatus::Present => {
             let authorized = match expected {
+                Feature::DeviceFirmware => "firmware_info_not_authorized",
                 Feature::KeepAlive => "range_query_authorized",
                 Feature::Brightness => "brightness_get_not_authorized",
                 Feature::Display => "geometry_get_not_authorized",

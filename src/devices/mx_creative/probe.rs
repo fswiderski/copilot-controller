@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256};
 
 use crate::native::hid::{
     HidBackend, HidBus, HidDescriptor, HidDevice, HidError, HidIdentity, HidMatcher,
-    MxCreativeDisplayInfoBackend, enumerate,
+    MxCreativeDisplayInfoBackend, MxCreativeFirmwareInfoBackend, ReportDescriptorEvidence,
+    enumerate,
 };
 
 pub(super) const VID: u16 = 0x046d;
@@ -211,8 +212,54 @@ fn selection_message(error: SelectionError) -> String {
     }
 }
 
+pub(super) trait MxCreativeInfoBackend {
+    fn enumerate(
+        &self,
+        matcher: &HidMatcher,
+        limit: usize,
+    ) -> std::result::Result<Vec<HidDescriptor>, HidError>;
+    fn original_report_descriptor_evidence(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> std::result::Result<ReportDescriptorEvidence, HidError>;
+}
+
+impl MxCreativeInfoBackend for MxCreativeDisplayInfoBackend {
+    fn enumerate(
+        &self,
+        matcher: &HidMatcher,
+        limit: usize,
+    ) -> std::result::Result<Vec<HidDescriptor>, HidError> {
+        MxCreativeDisplayInfoBackend::enumerate(self, matcher, limit)
+    }
+
+    fn original_report_descriptor_evidence(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> std::result::Result<ReportDescriptorEvidence, HidError> {
+        MxCreativeDisplayInfoBackend::original_report_descriptor_evidence(self, descriptor)
+    }
+}
+
+impl MxCreativeInfoBackend for MxCreativeFirmwareInfoBackend {
+    fn enumerate(
+        &self,
+        matcher: &HidMatcher,
+        limit: usize,
+    ) -> std::result::Result<Vec<HidDescriptor>, HidError> {
+        MxCreativeFirmwareInfoBackend::enumerate(self, matcher, limit)
+    }
+
+    fn original_report_descriptor_evidence(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> std::result::Result<ReportDescriptorEvidence, HidError> {
+        MxCreativeFirmwareInfoBackend::original_report_descriptor_evidence(self, descriptor)
+    }
+}
+
 pub(super) fn select_display_keypad(
-    backend: &MxCreativeDisplayInfoBackend,
+    backend: &impl MxCreativeInfoBackend,
 ) -> std::result::Result<HidDescriptor, String> {
     let matcher = HidMatcher {
         identity: HidIdentity {
@@ -583,6 +630,10 @@ fn elapsed_ms(now: Duration, started: Duration) -> u64 {
 
 fn hash(bytes: &[u8]) -> String {
     encode_hex(&Sha256::digest(bytes))
+}
+
+pub(super) fn report_descriptor_sha256(bytes: &[u8]) -> String {
+    hash(bytes)
 }
 
 fn decode_hex(text: &str) -> Vec<u8> {

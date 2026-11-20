@@ -63,6 +63,12 @@ pub(crate) use macos::display_info_hid_worker_capability;
     target_arch = "aarch64",
     feature = "mx-creative-hid"
 ))]
+pub(crate) use macos::firmware_info_hid_worker_capability;
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "mx-creative-hid"
+))]
 pub(crate) use macos::review_hid_worker_capability;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use macos::worker_health;
@@ -87,6 +93,8 @@ pub const AKP03_HIDDEN_WORKER_ARGUMENT: &str = "__akp03-worker";
 pub const MX_CREATIVE_HIDDEN_WORKER_ARGUMENT: &str = "__mx-creative-worker";
 pub const MX_CREATIVE_DISPLAY_INFO_HIDDEN_WORKER_ARGUMENT: &str =
     "__mx-creative-display-info-worker";
+pub const MX_CREATIVE_FIRMWARE_INFO_HIDDEN_WORKER_ARGUMENT: &str =
+    "__mx-creative-firmware-info-worker";
 /// Private streaming route; never a normal diagnostic request or public scope.
 pub const MX_CREATIVE_REVIEW_HIDDEN_WORKER_ARGUMENT: &str = "__mx-creative-review-worker";
 
@@ -136,6 +144,7 @@ pub enum DiagnosticWorkerRoute {
     Akp03,
     MxCreative,
     MxCreativeDisplayInfo,
+    MxCreativeFirmwareInfo,
 }
 
 impl DiagnosticWorkerRoute {
@@ -145,6 +154,7 @@ impl DiagnosticWorkerRoute {
             Self::Akp03 => AKP03_HIDDEN_WORKER_ARGUMENT,
             Self::MxCreative => MX_CREATIVE_HIDDEN_WORKER_ARGUMENT,
             Self::MxCreativeDisplayInfo => MX_CREATIVE_DISPLAY_INFO_HIDDEN_WORKER_ARGUMENT,
+            Self::MxCreativeFirmwareInfo => MX_CREATIVE_FIRMWARE_INFO_HIDDEN_WORKER_ARGUMENT,
         }
     }
 }

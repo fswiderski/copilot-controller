@@ -318,6 +318,7 @@ pub struct ExclusiveOpenProbe {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MxCreativeDisplayFeature {
+    DeviceFirmware,
     KeepAlive,
     Brightness,
     Display,
@@ -327,6 +328,7 @@ pub(crate) enum MxCreativeDisplayFeature {
 impl MxCreativeDisplayFeature {
     pub(crate) const fn id(self) -> u16 {
         match self {
+            Self::DeviceFirmware => 0x0003,
             Self::KeepAlive => 0x0008,
             Self::Brightness => 0x8040,
             Self::Display => 0x19a1,
@@ -342,6 +344,26 @@ pub(crate) enum MxCreativeDisplayQuery {
     BrightnessInfo { feature_index: u8 },
     BrightnessCurrent { feature_index: u8 },
     KeepAliveCheck { feature_index: u8 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MxCreativeFirmwareQuery {
+    Discover(MxCreativeDisplayFeature),
+    Count {
+        feature_index: u8,
+    },
+    Version {
+        feature_index: u8,
+        firmware_index: u8,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MxCreativeFirmwareReply {
+    FeatureIndex(u8),
+    Count(u8),
+    Version([u8; 16]),
+    HidppError(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -388,12 +410,53 @@ impl MxCreativeDisplayInfoBackend {
 }
 
 pub(crate) struct MxCreativeDisplayInfoDevice {
+    inner: MxCreativeHidppDevice,
+}
+
+pub(crate) struct MxCreativeFirmwareInfoBackend {
+    inner: Box<dyn HidBackend>,
+}
+
+impl MxCreativeFirmwareInfoBackend {
+    pub(crate) fn enumerate(
+        &self,
+        matcher: &HidMatcher,
+        limit: usize,
+    ) -> Result<Vec<HidDescriptor>, HidError> {
+        enumerate(self.inner.as_ref(), matcher, limit)
+    }
+
+    pub(crate) fn original_report_descriptor_evidence(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> Result<ReportDescriptorEvidence, HidError> {
+        self.inner.original_report_descriptor_evidence(descriptor)
+    }
+
+    pub(crate) fn open(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> Result<MxCreativeFirmwareInfoDevice, HidError> {
+        MxCreativeFirmwareInfoDevice::open(self.inner.as_ref(), descriptor)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_backend(inner: Box<dyn HidBackend>) -> Self {
+        Self { inner }
+    }
+}
+
+pub(crate) struct MxCreativeFirmwareInfoDevice {
+    inner: MxCreativeHidppDevice,
+}
+
+struct MxCreativeHidppDevice {
     transport: Box<dyn HidTransport>,
     next_software_id: u8,
     requests_sent: u8,
 }
 
-impl MxCreativeDisplayInfoDevice {
+impl MxCreativeHidppDevice {
     const REPORT_ID: u8 = 0x11;
     const REPORT_LEN: usize = 20;
     const DEVICE_INDEX: u8 = 0xff;
@@ -428,11 +491,13 @@ impl MxCreativeDisplayInfoDevice {
         self.transport.report_descriptor()
     }
 
-    pub(crate) fn query(
+    fn query(
         &mut self,
-        query: MxCreativeDisplayQuery,
+        feature_index: u8,
+        function: u8,
+        parameters: [u8; 2],
         timeout: Duration,
-    ) -> Result<MxCreativeDisplayReply, HidError> {
+    ) -> Result<Result<[u8; 16], u8>, HidError> {
         if timeout.is_zero() || timeout > Duration::from_secs(2) {
             return Err(HidError::InvalidArgument(ArgumentError::TimeoutTooLarge));
         }
@@ -444,44 +509,6 @@ impl MxCreativeDisplayInfoDevice {
             .ok_or(HidError::Protocol(
                 "MX display query software IDs exhausted",
             ))?;
-        let (feature_index, function, parameters) = match query {
-            MxCreativeDisplayQuery::Discover(feature) => (
-                0,
-                0,
-                [
-                    u8::try_from(feature.id() >> 8).expect("16-bit shift"),
-                    feature.id() as u8,
-                ],
-            ),
-            MxCreativeDisplayQuery::KeepAliveRange { feature_index }
-                if (1..=0xfe).contains(&feature_index) =>
-            {
-                (feature_index, 0, [0, 0])
-            }
-            MxCreativeDisplayQuery::KeepAliveRange { .. } => {
-                return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
-            }
-            MxCreativeDisplayQuery::BrightnessInfo { feature_index }
-                if (1..=0xfe).contains(&feature_index) =>
-            {
-                (feature_index, 0, [0, 0])
-            }
-            MxCreativeDisplayQuery::BrightnessCurrent { feature_index }
-                if (1..=0xfe).contains(&feature_index) =>
-            {
-                (feature_index, 1, [0, 0])
-            }
-            MxCreativeDisplayQuery::KeepAliveCheck { feature_index }
-                if (1..=0xfe).contains(&feature_index) =>
-            {
-                (feature_index, 1, 1000u16.to_be_bytes())
-            }
-            MxCreativeDisplayQuery::BrightnessInfo { .. }
-            | MxCreativeDisplayQuery::BrightnessCurrent { .. }
-            | MxCreativeDisplayQuery::KeepAliveCheck { .. } => {
-                return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
-            }
-        };
         let frame = display_query_frame(feature_index, function, software_id, parameters);
         if self.transport.write(&frame)? != frame.len() {
             return Err(HidError::Protocol(
@@ -517,7 +544,7 @@ impl MxCreativeDisplayInfoDevice {
                         "uncorrelated MX display HID++ error function",
                     ));
                 }
-                return Ok(MxCreativeDisplayReply::HidppError(buffer[5]));
+                return Ok(Err(buffer[5]));
             }
             if buffer[3] & 0x0f != software_id {
                 continue;
@@ -527,31 +554,156 @@ impl MxCreativeDisplayInfoDevice {
                     "uncorrelated MX display response function",
                 ));
             }
-            return match query {
+            return Ok(Ok(buffer[4..20]
+                .try_into()
+                .expect("fixed HID++ response payload length")));
+        }
+    }
+}
+
+impl MxCreativeDisplayInfoDevice {
+    fn open(backend: &dyn HidBackend, descriptor: &HidDescriptor) -> Result<Self, HidError> {
+        Ok(Self {
+            inner: MxCreativeHidppDevice::open(backend, descriptor)?,
+        })
+    }
+
+    pub(crate) const fn requests_sent(&self) -> u8 {
+        self.inner.requests_sent()
+    }
+
+    pub(crate) fn report_descriptor(&mut self) -> Result<Vec<u8>, HidError> {
+        self.inner.report_descriptor()
+    }
+
+    pub(crate) fn query(
+        &mut self,
+        query: MxCreativeDisplayQuery,
+        timeout: Duration,
+    ) -> Result<MxCreativeDisplayReply, HidError> {
+        let (feature_index, function, parameters) = match query {
+            MxCreativeDisplayQuery::Discover(feature) => (
+                0,
+                0,
+                [
+                    u8::try_from(feature.id() >> 8).expect("16-bit shift"),
+                    feature.id() as u8,
+                ],
+            ),
+            MxCreativeDisplayQuery::KeepAliveRange { feature_index }
+                if (1..=0xfe).contains(&feature_index) =>
+            {
+                (feature_index, 0, [0, 0])
+            }
+            MxCreativeDisplayQuery::BrightnessInfo { feature_index }
+                if (1..=0xfe).contains(&feature_index) =>
+            {
+                (feature_index, 0, [0, 0])
+            }
+            MxCreativeDisplayQuery::BrightnessCurrent { feature_index }
+                if (1..=0xfe).contains(&feature_index) =>
+            {
+                (feature_index, 1, [0, 0])
+            }
+            MxCreativeDisplayQuery::KeepAliveCheck { feature_index }
+                if (1..=0xfe).contains(&feature_index) =>
+            {
+                (feature_index, 1, 1000u16.to_be_bytes())
+            }
+            MxCreativeDisplayQuery::KeepAliveRange { .. }
+            | MxCreativeDisplayQuery::BrightnessInfo { .. }
+            | MxCreativeDisplayQuery::BrightnessCurrent { .. }
+            | MxCreativeDisplayQuery::KeepAliveCheck { .. } => {
+                return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
+            }
+        };
+        match self
+            .inner
+            .query(feature_index, function, parameters, timeout)?
+        {
+            Err(code) => Ok(MxCreativeDisplayReply::HidppError(code)),
+            Ok(payload) => Ok(match query {
                 MxCreativeDisplayQuery::Discover(_) => {
-                    Ok(MxCreativeDisplayReply::FeatureIndex(buffer[4]))
+                    MxCreativeDisplayReply::FeatureIndex(payload[0])
                 }
                 MxCreativeDisplayQuery::KeepAliveRange { .. } => {
-                    let bytes = &buffer[4..8];
-                    Ok(MxCreativeDisplayReply::KeepAliveRange {
-                        minimum_ms: u16::from_be_bytes([bytes[0], bytes[1]]),
-                        maximum_ms: u16::from_be_bytes([bytes[2], bytes[3]]),
-                    })
+                    MxCreativeDisplayReply::KeepAliveRange {
+                        minimum_ms: u16::from_be_bytes([payload[0], payload[1]]),
+                        maximum_ms: u16::from_be_bytes([payload[2], payload[3]]),
+                    }
                 }
                 MxCreativeDisplayQuery::BrightnessInfo { .. } => {
-                    Ok(MxCreativeDisplayReply::BrightnessInfo(
-                        buffer[4..20]
-                            .try_into()
-                            .expect("fixed HID++ response payload length"),
-                    ))
+                    MxCreativeDisplayReply::BrightnessInfo(payload)
                 }
                 MxCreativeDisplayQuery::BrightnessCurrent { .. } => {
-                    Ok(MxCreativeDisplayReply::BrightnessCurrent(buffer[4]))
+                    MxCreativeDisplayReply::BrightnessCurrent(payload[0])
                 }
                 MxCreativeDisplayQuery::KeepAliveCheck { .. } => {
-                    Ok(MxCreativeDisplayReply::Acknowledged)
+                    MxCreativeDisplayReply::Acknowledged
                 }
-            };
+            }),
+        }
+    }
+}
+
+impl MxCreativeFirmwareInfoDevice {
+    fn open(backend: &dyn HidBackend, descriptor: &HidDescriptor) -> Result<Self, HidError> {
+        Ok(Self {
+            inner: MxCreativeHidppDevice::open(backend, descriptor)?,
+        })
+    }
+
+    pub(crate) const fn requests_sent(&self) -> u8 {
+        self.inner.requests_sent()
+    }
+
+    pub(crate) fn report_descriptor(&mut self) -> Result<Vec<u8>, HidError> {
+        self.inner.report_descriptor()
+    }
+
+    pub(crate) fn query(
+        &mut self,
+        query: MxCreativeFirmwareQuery,
+        timeout: Duration,
+    ) -> Result<MxCreativeFirmwareReply, HidError> {
+        let (feature_index, function, parameters) = match query {
+            MxCreativeFirmwareQuery::Discover(MxCreativeDisplayFeature::DeviceFirmware) => {
+                (0, 0, [0, 3])
+            }
+            MxCreativeFirmwareQuery::Discover(_) => {
+                return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
+            }
+            MxCreativeFirmwareQuery::Count { feature_index } => (feature_index, 0, [0, 0]),
+            MxCreativeFirmwareQuery::Version {
+                feature_index,
+                firmware_index,
+            } if firmware_index < 8 => (feature_index, 1, [firmware_index, 0]),
+            MxCreativeFirmwareQuery::Version { .. } => {
+                return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
+            }
+        };
+        if feature_index == 0xff
+            || (function != 0 && feature_index == 0)
+            || (function == 0
+                && feature_index == 0
+                && !matches!(query, MxCreativeFirmwareQuery::Discover(_)))
+        {
+            return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
+        }
+        match self
+            .inner
+            .query(feature_index, function, parameters, timeout)?
+        {
+            Err(code) => Ok(MxCreativeFirmwareReply::HidppError(code)),
+            Ok(payload) => Ok(match query {
+                MxCreativeFirmwareQuery::Discover(_) => {
+                    MxCreativeFirmwareReply::FeatureIndex(payload[0])
+                }
+                MxCreativeFirmwareQuery::Count { .. } => MxCreativeFirmwareReply::Count(payload[0]),
+                MxCreativeFirmwareQuery::Version { .. } => {
+                    MxCreativeFirmwareReply::Version(payload)
+                }
+            }),
         }
     }
 }
@@ -561,12 +713,12 @@ fn display_query_frame(
     function: u8,
     software_id: u8,
     parameters: [u8; 2],
-) -> [u8; MxCreativeDisplayInfoDevice::REPORT_LEN] {
+) -> [u8; MxCreativeHidppDevice::REPORT_LEN] {
     debug_assert!(function <= 0x0f);
     debug_assert!((1..=0x0f).contains(&software_id));
-    let mut frame = [0; MxCreativeDisplayInfoDevice::REPORT_LEN];
-    frame[0] = MxCreativeDisplayInfoDevice::REPORT_ID;
-    frame[1] = MxCreativeDisplayInfoDevice::DEVICE_INDEX;
+    let mut frame = [0; MxCreativeHidppDevice::REPORT_LEN];
+    frame[0] = MxCreativeHidppDevice::REPORT_ID;
+    frame[1] = MxCreativeHidppDevice::DEVICE_INDEX;
     frame[2] = feature_index;
     frame[3] = (function << 4) | software_id;
     frame[4] = parameters[0];
@@ -846,6 +998,33 @@ pub(crate) fn mx_creative_display_info_backend() -> Result<MxCreativeDisplayInfo
     {
         Ok(MxCreativeDisplayInfoBackend {
             inner: Box::new(iokit::IoKitHid::new_for_mx_creative_display_info()?),
+        })
+    }
+    #[cfg(not(feature = "mx-creative-hid"))]
+    {
+        Err(HidError::Unavailable(UnavailableReason::FeatureDisabled))
+    }
+    #[cfg(all(
+        feature = "mx-creative-hid",
+        not(all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    {
+        Err(HidError::Unavailable(
+            UnavailableReason::UnsupportedPlatform,
+        ))
+    }
+}
+
+pub(crate) fn mx_creative_firmware_info_backend() -> Result<MxCreativeFirmwareInfoBackend, HidError>
+{
+    #[cfg(all(
+        feature = "mx-creative-hid",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    {
+        Ok(MxCreativeFirmwareInfoBackend {
+            inner: Box::new(iokit::IoKitHid::new_for_mx_creative_firmware_info()?),
         })
     }
     #[cfg(not(feature = "mx-creative-hid"))]

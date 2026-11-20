@@ -314,6 +314,7 @@ fn run_checked_getters(
 
 fn feature_result(feature: Feature, reply: Reply) -> FeatureInfo {
     let metadata_status = match feature {
+        Feature::DeviceFirmware => "firmware_info_not_authorized",
         Feature::KeepAlive => "range_query_authorized",
         Feature::Brightness => "brightness_get_not_authorized",
         Feature::Display => "geometry_get_not_authorized",
