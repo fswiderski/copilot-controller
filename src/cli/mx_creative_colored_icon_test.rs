@@ -161,7 +161,7 @@ pub(super) fn valid_result(result: &Result) -> bool {
         let Some(icon) = paint.icons.first() else {
             return false;
         };
-        let Some((expected_key, _expected_name, expected_source_svg_path)) = expected_icon_specs()
+        let Some((expected_key, _expected_name, expected_source_asset_path)) = expected_icon_specs()
             .into_iter()
             .find(|(_, expected_name, _)| *expected_name == icon.name)
         else {
@@ -192,11 +192,11 @@ pub(super) fn valid_result(result: &Result) -> bool {
             && paint.targeted_keys == vec![expected_key]
             && paint.untouched_keys == expected_untouched
             && paint.source_repository == "fes/fesReview-mx-icons"
-            && paint.source_commit == "7a339c9"
-            && paint.source_svg_root == "assets/mx-keypad-icons"
+            && paint.source_commit == "2823c8c31b02caba0f08fe4c88a8afb251f0f8ab"
+            && paint.source_asset_root == "assets/mx-keypad-icons/reference"
             && paint.icons.len() == 1
             && icon.key_index == expected_key
-            && icon.source_svg_path == expected_source_svg_path
+            && icon.source_asset_path == expected_source_asset_path
             && valid_digest(&icon.source_png_sha256)
             && icon.jpeg_baseline_jfif
             && !icon.jpeg_contains_app1
@@ -414,12 +414,12 @@ mod tests {
                 targeted_keys: vec![1],
                 untouched_keys: vec![2, 3, 4, 5, 6, 7, 8, 9],
                 source_repository: "fes/fesReview-mx-icons".into(),
-                source_commit: "7a339c9".into(),
-                source_svg_root: "assets/mx-keypad-icons".into(),
+                source_commit: "2823c8c31b02caba0f08fe4c88a8afb251f0f8ab".into(),
+                source_asset_root: "assets/mx-keypad-icons/reference".into(),
                 icons: vec![crate::devices::mx_creative::colored_icon_test::IconEvidence {
                     key_index: 1,
                     name: "play-pause".into(),
-                    source_svg_path: "play-pause.svg".into(),
+                    source_asset_path: "play-pause.png".into(),
                     source_png_sha256: "0".repeat(64),
                     jpeg_len: 3000,
                     jpeg_sha256: "0".repeat(64),

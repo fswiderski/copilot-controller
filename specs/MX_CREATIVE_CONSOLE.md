@@ -320,11 +320,12 @@ The `<name>` value must be one of:
   `size=118`) and select one mapped key from:
   key1 `play-pause`, key2 `first-frame`, key3 `last-frame`, key4 `back-1s`,
   key5 `forward-1s`, key6 `screenshot`, key7 `dictate`;
-- icon sources are pinned to original fesReview SVG provenance:
-  repository `fes/fesReview-mx-icons`, commit `7a339c9`,
-  root `assets/mx-keypad-icons`, with fixed mapping to
-  `play-pause.svg|first-frame.svg|last-frame.svg|back-1s.svg|forward-1s.svg|screenshot.svg|dictate.svg`;
-- compile-time embedded PNG artifacts (derived from those SVGs) are decoded and
+- icon sources are pinned to the operator-accepted raster crops:
+  repository `fes/fesReview-mx-icons`,
+  commit `2823c8c31b02caba0f08fe4c88a8afb251f0f8ab`,
+  root `assets/mx-keypad-icons/reference`, with fixed mapping to
+  `play-pause.png|first-frame.png|last-frame.png|back-1s.png|forward-1s.png|screenshot.png|dictate.png`;
+- compile-time embedded PNG artifacts are decoded and
   re-encoded in Rust to bounded baseline JPEG payloads (`<4075` bytes each),
   requiring JFIF APP0 and rejecting APP1/Exif metadata;
 - KeepAlive remains fixed at `3000 ms`, activated once before paint and
