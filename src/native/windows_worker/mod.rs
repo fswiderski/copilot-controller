@@ -18,7 +18,17 @@ use serde_json::Value;
 #[cfg(not(windows))]
 use uuid::Uuid;
 
-#[cfg(any(test, all(windows, any(feature = "micro-hid", feature = "akp03-hid"))))]
+#[cfg(any(
+    test,
+    all(
+        windows,
+        any(
+            feature = "micro-hid",
+            feature = "akp03-hid",
+            feature = "mx-creative-hid"
+        )
+    )
+))]
 mod hid_scope;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod macos;
@@ -27,7 +37,14 @@ mod protocol;
 mod supervision;
 #[cfg(windows)]
 mod windows;
-#[cfg(all(windows, any(feature = "micro-hid", feature = "akp03-hid")))]
+#[cfg(all(
+    windows,
+    any(
+        feature = "micro-hid",
+        feature = "akp03-hid",
+        feature = "mx-creative-hid"
+    )
+))]
 pub(crate) use hid_scope::{HidWorkerCapability, hid_worker_capability};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use macos::CtWorkerCapability;
@@ -35,12 +52,46 @@ pub(crate) use macos::CtWorkerCapability;
 pub(crate) use macos::ct_probe_containment;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use macos::ct_worker_capability;
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "mx-creative-hid"
+))]
+pub(crate) use macos::display_info_hid_worker_capability;
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "mx-creative-hid"
+))]
+pub(crate) use macos::display_route_hid_worker_capability;
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "mx-creative-hid"
+))]
+pub(crate) use macos::firmware_info_hid_worker_capability;
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "mx-creative-hid"
+))]
+pub(crate) use macos::review_hid_worker_capability;
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "mx-creative-hid"
+))]
+pub(crate) use macos::single_key_paint_hid_worker_capability;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use macos::worker_health;
 #[cfg(all(
     target_os = "macos",
     target_arch = "aarch64",
-    any(feature = "micro-hid", feature = "akp03-hid")
+    any(
+        feature = "micro-hid",
+        feature = "akp03-hid",
+        feature = "mx-creative-hid"
+    )
 ))]
 pub(crate) use macos::{HidWorkerCapability, hid_worker_capability};
 
@@ -51,12 +102,67 @@ mod tests;
 pub const HIDDEN_WORKER_ARGUMENT: &str = "__probe-worker";
 /// AKP03 uses the same supervisor with a separate kind-only hidden registry.
 pub const AKP03_HIDDEN_WORKER_ARGUMENT: &str = "__akp03-worker";
+pub const MX_CREATIVE_HIDDEN_WORKER_ARGUMENT: &str = "__mx-creative-worker";
+pub const MX_CREATIVE_DISPLAY_INFO_HIDDEN_WORKER_ARGUMENT: &str =
+    "__mx-creative-display-info-worker";
+pub const MX_CREATIVE_DISPLAY_ROUTE_HIDDEN_WORKER_ARGUMENT: &str =
+    "__mx-creative-display-route-worker";
+pub const MX_CREATIVE_FIRMWARE_INFO_HIDDEN_WORKER_ARGUMENT: &str =
+    "__mx-creative-firmware-info-worker";
+pub const MX_CREATIVE_SINGLE_KEY_PAINT_HIDDEN_WORKER_ARGUMENT: &str =
+    "__mx-creative-single-key-paint-worker";
+/// Private streaming route; never a normal diagnostic request or public scope.
+pub const MX_CREATIVE_REVIEW_HIDDEN_WORKER_ARGUMENT: &str = "__mx-creative-review-worker";
+
+pub fn supervise_mx_creative_review() -> Result<(), WorkerError> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        macos::supervise_mx_creative_review()
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        Err(WorkerError::before_launch(
+            WorkerErrorKind::UnsupportedPlatform,
+        ))
+    }
+}
+
+pub fn maybe_run_mx_creative_review_worker<I, S>(arguments: I) -> Option<Result<(), WorkerError>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut arguments = arguments.into_iter();
+    if arguments.next()?.as_ref() != OsStr::new(MX_CREATIVE_REVIEW_HIDDEN_WORKER_ARGUMENT) {
+        return None;
+    }
+    if arguments.next().is_some() {
+        return Some(Err(WorkerError::before_launch(
+            WorkerErrorKind::InvalidRequest,
+        )));
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        Some(macos::mx_creative_review_worker_main())
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        Some(Err(WorkerError::before_launch(
+            WorkerErrorKind::UnsupportedPlatform,
+        )))
+    }
+}
 
 /// Fixed same-executable routes, never arbitrary command-line arguments.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticWorkerRoute {
     Shared,
     Akp03,
+    MxCreative,
+    MxCreativeDisplayInfo,
+    MxCreativeDisplayRoute,
+    MxCreativeFirmwareInfo,
+    MxCreativeSingleKeyPaint,
 }
 
 impl DiagnosticWorkerRoute {
@@ -64,6 +170,11 @@ impl DiagnosticWorkerRoute {
         match self {
             Self::Shared => HIDDEN_WORKER_ARGUMENT,
             Self::Akp03 => AKP03_HIDDEN_WORKER_ARGUMENT,
+            Self::MxCreative => MX_CREATIVE_HIDDEN_WORKER_ARGUMENT,
+            Self::MxCreativeDisplayInfo => MX_CREATIVE_DISPLAY_INFO_HIDDEN_WORKER_ARGUMENT,
+            Self::MxCreativeDisplayRoute => MX_CREATIVE_DISPLAY_ROUTE_HIDDEN_WORKER_ARGUMENT,
+            Self::MxCreativeFirmwareInfo => MX_CREATIVE_FIRMWARE_INFO_HIDDEN_WORKER_ARGUMENT,
+            Self::MxCreativeSingleKeyPaint => MX_CREATIVE_SINGLE_KEY_PAINT_HIDDEN_WORKER_ARGUMENT,
         }
     }
 }

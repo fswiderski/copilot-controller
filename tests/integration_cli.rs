@@ -70,6 +70,14 @@ fn inventory_and_doctor_are_truthful_and_never_action_ready() {
         capabilities["ct_serial_probe_available"],
         cfg!(windows) || cfg!(all(target_os = "macos", target_arch = "aarch64"))
     );
+    assert_eq!(
+        capabilities["mx_creative_display_route_available"],
+        cfg!(all(
+            target_os = "macos",
+            target_arch = "aarch64",
+            feature = "mx-creative-hid"
+        ))
+    );
     assert_eq!(capabilities["firmware_execution_available"], false);
     assert_eq!(capabilities["runtime_owner_acquired"], false);
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -295,6 +303,14 @@ fn hid_cli_validation_and_hidden_routes_never_emit_success_output() {
         vec!["akp03-probe", "--initialize", "--health-check"],
         vec!["akp03-probe", "--query"],
         vec!["akp03-probe", "--path", "anything"],
+        vec!["mx-creative-colored-icon-test"],
+        vec!["mx-creative-colored-icon-test", "--wrong"],
+        vec!["mx-creative-colored-icon-test", "--confirm-colored-icon"],
+        vec![
+            "mx-creative-colored-icon-test",
+            "--confirm-colored-icon",
+            "unknown",
+        ],
         vec!["__akp03-worker"],
         vec!["__akp03-worker", "extra"],
         vec!["__akp03-worker", "--capture-ms", "0"],
@@ -314,6 +330,11 @@ fn hid_cli_validation_and_hidden_routes_never_emit_success_output() {
     assert!(text.contains("--exclusive-check"));
     assert!(text.contains("--backlight-test <rgb|red|green|blue|gray|brightness>"));
     assert!(text.contains("akp03-probe"));
+    assert!(
+        text.contains(
+            "mx-creative-colored-icon-test --confirm-colored-icon <play-pause|first-frame|last-frame|back-1s|forward-1s|screenshot|dictate>"
+        )
+    );
     assert!(!text.contains("__probe-worker"));
     assert!(!text.contains("__akp03-worker"));
     #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]

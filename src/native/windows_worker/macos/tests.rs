@@ -319,6 +319,11 @@ fn isolated(test: &str) {
 #[test]
 fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
     assert!(hid_worker_capability().is_none());
+    assert!(display_info_hid_worker_capability().is_none());
+    assert!(display_route_hid_worker_capability().is_none());
+    assert!(firmware_info_hid_worker_capability().is_none());
+    assert!(single_key_paint_hid_worker_capability().is_none());
+    assert!(review_hid_worker_capability().is_none());
     assert!(ct_worker_capability().is_none());
     assert!(worker_health().is_err());
     for (route, allowlist) in [
@@ -330,20 +335,229 @@ fn macos_direct_routes_and_uncontained_capabilities_are_rejected() {
             "__akp03-worker",
             crate::cli::akp03_probe_allowlist().unwrap(),
         ),
+        (
+            "__mx-creative-worker",
+            crate::cli::mx_creative_evidence_allowlist().unwrap(),
+        ),
+        (
+            "__mx-creative-display-info-worker",
+            crate::cli::mx_creative_display_info_allowlist().unwrap(),
+        ),
+        (
+            "__mx-creative-display-route-worker",
+            crate::cli::mx_creative_display_route_allowlist().unwrap(),
+        ),
+        (
+            "__mx-creative-firmware-info-worker",
+            crate::cli::mx_creative_firmware_info_allowlist().unwrap(),
+        ),
+        (
+            "__mx-creative-single-key-paint-worker",
+            crate::cli::mx_creative_single_key_paint_allowlist().unwrap(),
+        ),
     ] {
         let error = super::super::maybe_run_hidden_worker([route], &allowlist)
             .unwrap()
             .unwrap_err();
         assert_eq!(error.kind, Kind::Containment);
     }
+    let review = super::super::maybe_run_mx_creative_review_worker([
+        super::super::MX_CREATIVE_REVIEW_HIDDEN_WORKER_ARGUMENT,
+    ])
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(review.kind, Kind::Containment);
 
-    #[cfg(any(feature = "micro-hid", feature = "akp03-hid"))]
+    #[cfg(any(
+        feature = "micro-hid",
+        feature = "akp03-hid",
+        feature = "mx-creative-hid"
+    ))]
     assert!(matches!(
         crate::native::hid::native_backend(),
         Err(crate::native::hid::HidError::Unavailable(
             crate::native::hid::UnavailableReason::UnsupervisedAccess
         ))
     ));
+}
+
+#[test]
+fn macos_mx_creative_request_gets_live_read_authority_without_health_field() {
+    let request = DiagnosticRequest {
+        kind: "mx_creative_evidence".into(),
+        payload: serde_json::json!({"capture_ms":0}),
+    };
+    assert_eq!(request_authority(&request), Ok(ScopeAuthority::HidLive));
+    assert_eq!(
+        request_authority(&DiagnosticRequest {
+            kind: "mx_creative_display_info".into(),
+            payload: serde_json::json!({}),
+        }),
+        Ok(ScopeAuthority::MxCreativeDisplayInfo)
+    );
+    assert_eq!(
+        request_authority(&DiagnosticRequest {
+            kind: "mx_creative_display_route".into(),
+            payload: Value::Null,
+        }),
+        Ok(ScopeAuthority::MxCreativeDisplayRoute)
+    );
+    assert_eq!(
+        request_authority(&DiagnosticRequest {
+            kind: "mx_creative_firmware_info".into(),
+            payload: serde_json::json!({}),
+        }),
+        Ok(ScopeAuthority::MxCreativeFirmwareInfo)
+    );
+    assert_eq!(
+        request_authority(&DiagnosticRequest {
+            kind: "mx_creative_single_key_paint".into(),
+            payload: Value::Null,
+        }),
+        Ok(ScopeAuthority::MxCreativeSingleKeyPaint)
+    );
+    assert_eq!(
+        request_authority(&DiagnosticRequest {
+            kind: "mx_creative_colored_icon_test".into(),
+            payload: serde_json::json!({"icon":"play-pause"}),
+        }),
+        Ok(ScopeAuthority::MxCreativeSingleKeyPaint)
+    );
+    assert_eq!(
+        validate_platform_request(&DiagnosticRequest {
+            kind: "mx_creative_display_route".into(),
+            payload: Value::Null,
+        }),
+        Ok(Duration::from_secs(8))
+    );
+    assert_eq!(
+        validate_platform_request(&DiagnosticRequest {
+            kind: "mx_creative_firmware_info".into(),
+            payload: serde_json::json!({}),
+        }),
+        Ok(Duration::from_secs(22))
+    );
+    assert_eq!(
+        validate_platform_request(&DiagnosticRequest {
+            kind: "mx_creative_single_key_paint".into(),
+            payload: Value::Null,
+        }),
+        Ok(crate::devices::mx_creative::single_key_paint::BUDGET)
+    );
+    assert_eq!(
+        validate_platform_request(&DiagnosticRequest {
+            kind: "mx_creative_colored_icon_test".into(),
+            payload: serde_json::json!({"icon":"play-pause"}),
+        }),
+        Ok(crate::devices::mx_creative::colored_icon_test::BUDGET)
+    );
+    assert_eq!(
+        validate_platform_request(&DiagnosticRequest {
+            kind: "mx_creative_display_info".into(),
+            payload: serde_json::json!({"keepalive_check_ms":1000}),
+        }),
+        Ok(Duration::from_secs(18))
+    );
+    assert_eq!(
+        validate_platform_request(&DiagnosticRequest {
+            kind: "mx_creative_display_info".into(),
+            payload: serde_json::json!({"keepalive_check_ms":999}),
+        }),
+        Err(Kind::InvalidRequest)
+    );
+    assert_eq!(
+        request_authority(&DiagnosticRequest {
+            kind: "mx_creative_review".into(),
+            payload: Value::Null,
+        }),
+        Err(Kind::InvalidRequest)
+    );
+}
+
+#[test]
+fn review_ipc_is_strict_bounded_and_action_only() {
+    let nonce = Uuid::new_v4();
+    let frame = encode_live(&LiveMessage {
+        version: LIVE_VERSION,
+        nonce,
+        kind: LiveMessageKind::Action,
+        action: Some(crate::devices::mx_creative::review_input::Action::NextFrame),
+    })
+    .unwrap();
+    let mut frames = LiveFrameBuffer::default();
+    frames.push(&frame[..2]).unwrap();
+    assert!(frames.pop().unwrap().is_none());
+    frames.push(&frame[2..]).unwrap();
+    assert!(frames.pop().unwrap().is_some());
+    assert!(frames.empty());
+
+    let mut duplicate = br#"{"version":1,"nonce":""#.to_vec();
+    duplicate.extend_from_slice(b",\"nonce\":\"\"}");
+    assert!(protocol::decode_frame_body::<LiveRequest>(&duplicate).is_err());
+    let oversized = vec![b'x'; MAX_LIVE_FRAME + 1];
+    assert_eq!(frames.push(&oversized), Ok(()));
+    assert!(matches!(frames.pop(), Err(Kind::FrameLimit)));
+    let unknown = protocol::encode_frame(&json!({
+        "version": LIVE_VERSION,
+        "nonce": nonce,
+        "kind": "action",
+        "action": "next_frame",
+        "command": "write"
+    }))
+    .unwrap();
+    let mut invalid = LiveFrameBuffer::default();
+    invalid.push(&unknown).unwrap();
+    assert!(invalid.pop().is_err());
+}
+
+struct Blocked;
+
+impl Write for Blocked {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let _ = bytes;
+        Err(io::ErrorKind::WouldBlock.into())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn review_parent_output_has_one_bounded_pending_line() {
+    let now = Instant::now();
+    let mut output = OutputGate::new();
+    output
+        .enqueue(
+            crate::devices::mx_creative::review_input::Action::TogglePlay,
+            now,
+        )
+        .unwrap();
+    assert!(
+        output
+            .enqueue(
+                crate::devices::mx_creative::review_input::Action::Screenshot,
+                now
+            )
+            .is_err()
+    );
+    output.flush(&mut Blocked, now).unwrap();
+    assert!(
+        output
+            .flush(&mut Blocked, now + LIVE_WRITE + Duration::from_millis(1))
+            .is_err()
+    );
+}
+
+#[test]
+fn review_lifecycle_rejects_parent_data_and_accepts_eof() {
+    assert_eq!(accept_parent_input(Ok(0)), Ok(false));
+    assert_eq!(accept_parent_input(Ok(1)), Err(Kind::Protocol));
+    assert_eq!(accept_parent_input(Ok(65_536)), Err(Kind::Protocol));
+    assert_eq!(
+        accept_parent_input(Err(io::ErrorKind::WouldBlock.into())),
+        Ok(true)
+    );
 }
 
 #[test]
@@ -402,7 +616,11 @@ fn macos_write_capability_is_scoped_health_denied_and_native_output_uses_the_gat
         let _live = WorkerScope::enter(ScopeAuthority::HidLive).unwrap();
         capability = hid_worker_capability().unwrap();
         assert!(capability.valid());
-        #[cfg(any(feature = "micro-hid", feature = "akp03-hid"))]
+        #[cfg(any(
+            feature = "micro-hid",
+            feature = "akp03-hid",
+            feature = "mx-creative-hid"
+        ))]
         {
             // Constructor and fake SetReport only; never enumerate/open IOKit.
             assert!(crate::native::hid::native_backend().is_ok());
@@ -416,6 +634,52 @@ fn macos_write_capability_is_scoped_health_denied_and_native_output_uses_the_gat
                     .unwrap();
                 assert_eq!(written, report.len());
             }
+            #[cfg(feature = "mx-creative-hid")]
+            {
+                let display_report = vec![0x14; 4095];
+                let written = crate::native::hid::fixture_output_mx_creative_display(
+                    &capability,
+                    &display_report,
+                    |id, bytes| {
+                        assert_eq!(id, 0x14);
+                        assert_eq!(bytes, &display_report);
+                        0
+                    },
+                )
+                .unwrap();
+                assert_eq!(written, display_report.len());
+                assert_eq!(
+                    crate::native::hid::fixture_output(&capability, &display_report, |_, _| 0),
+                    Err(crate::native::hid::HidError::InvalidArgument(
+                        crate::native::hid::ArgumentError::ReportTooLarge
+                    ))
+                );
+
+                let mut wrong_id = display_report.clone();
+                wrong_id[0] = 0x13;
+                assert_eq!(
+                    crate::native::hid::fixture_output_mx_creative_display(
+                        &capability,
+                        &wrong_id,
+                        |_, _| panic!("invalid id must fail before write")
+                    ),
+                    Err(crate::native::hid::HidError::InvalidArgument(
+                        crate::native::hid::ArgumentError::ReportExceedsDevice
+                    ))
+                );
+
+                let short = vec![0x14; 4094];
+                assert_eq!(
+                    crate::native::hid::fixture_output_mx_creative_display(
+                        &capability,
+                        &short,
+                        |_, _| panic!("invalid length must fail before write")
+                    ),
+                    Err(crate::native::hid::HidError::InvalidArgument(
+                        crate::native::hid::ArgumentError::ReportExceedsDevice
+                    ))
+                );
+            }
         }
     }
     assert!(!capability.valid());
@@ -427,11 +691,26 @@ fn macos_write_capability_is_scoped_health_denied_and_native_output_uses_the_gat
             "a later request must not revive the old capability"
         );
     }
-    #[cfg(any(feature = "micro-hid", feature = "akp03-hid"))]
+    #[cfg(any(
+        feature = "micro-hid",
+        feature = "akp03-hid",
+        feature = "mx-creative-hid"
+    ))]
     assert_eq!(
         crate::native::hid::fixture_output(&capability, &[6; 64], |_, _| panic!(
             "unscoped native write"
         )),
+        Err(crate::native::hid::HidError::Unavailable(
+            crate::native::hid::UnavailableReason::UnsupervisedWrite
+        )),
+    );
+    #[cfg(feature = "mx-creative-hid")]
+    assert_eq!(
+        crate::native::hid::fixture_output_mx_creative_display(
+            &capability,
+            &[0x14; 4095],
+            |_, _| panic!("unscoped native display write")
+        ),
         Err(crate::native::hid::HidError::Unavailable(
             crate::native::hid::UnavailableReason::UnsupervisedWrite
         )),

@@ -1376,6 +1376,7 @@ mod tests {
             max_output_report_len: REPORT_SIZE,
             interface_number: Some(2),
             bus: Some(HidBus::Usb),
+            location_id: Some(0x0200_0000),
             path: crate::native::hid::HidPath::new("fake").unwrap(),
         }
     }

@@ -6,7 +6,7 @@ use std::{
     marker::PhantomData,
     os::unix::{
         ffi::OsStrExt,
-        io::{FromRawFd, IntoRawFd},
+        io::{AsRawFd, FromRawFd, IntoRawFd},
         process::CommandExt,
     },
     path::Path,
@@ -20,9 +20,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
+#[cfg(any(
+    feature = "micro-hid",
+    feature = "akp03-hid",
+    feature = "mx-creative-hid",
+    test
+))]
 use std::rc::Rc;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -46,12 +52,16 @@ thread_local! {
     static WORKER_SCOPE: Cell<Option<(ScopeAuthority, Uuid)>> = const { Cell::new(None) };
     static WATCHDOG_PARENT: Cell<Option<WorkerIdentity>> = const { Cell::new(None) };
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScopeAuthority {
     Health,
     HidHealth,
     HidLive,
+    MxCreativeDisplayInfo,
+    MxCreativeDisplayRoute,
+    MxCreativeFirmwareInfo,
+    MxCreativeSingleKeyPaint,
+    MxCreativeReview,
     CtSerialProbe,
 }
 
@@ -82,18 +92,29 @@ impl Drop for WorkerScope {
 
 /// No public constructor; neither health nor ordinary in-process callers get it.
 #[derive(Clone)]
-#[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
+#[cfg(any(
+    feature = "micro-hid",
+    feature = "akp03-hid",
+    feature = "mx-creative-hid",
+    test
+))]
 pub(crate) struct HidWorkerCapability {
     pid: libc::pid_t,
     scope_nonce: Uuid,
     parent: WorkerIdentity,
+    authority: ScopeAuthority,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
-#[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
+#[cfg(any(
+    feature = "micro-hid",
+    feature = "akp03-hid",
+    feature = "mx-creative-hid",
+    test
+))]
 impl HidWorkerCapability {
     pub(crate) fn valid(&self) -> bool {
-        WORKER_SCOPE.with(|scope| scope.get() == Some((ScopeAuthority::HidLive, self.scope_nonce)))
+        WORKER_SCOPE.with(|scope| scope.get() == Some((self.authority, self.scope_nonce)))
             && unsafe { libc::getpid() } == self.pid
             && verify_containment().is_ok()
             && WATCHDOG_PARENT.with(Cell::get) == Some(self.parent)
@@ -102,11 +123,51 @@ impl HidWorkerCapability {
     }
 }
 
-#[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
+#[cfg(any(
+    feature = "micro-hid",
+    feature = "akp03-hid",
+    feature = "mx-creative-hid",
+    test
+))]
 pub(crate) fn hid_worker_capability() -> Option<HidWorkerCapability> {
+    hid_capability_for(ScopeAuthority::HidLive)
+}
+
+#[cfg(any(feature = "mx-creative-hid", test))]
+pub(crate) fn review_hid_worker_capability() -> Option<HidWorkerCapability> {
+    hid_capability_for(ScopeAuthority::MxCreativeReview)
+}
+
+#[cfg(any(feature = "mx-creative-hid", test))]
+pub(crate) fn display_info_hid_worker_capability() -> Option<HidWorkerCapability> {
+    hid_capability_for(ScopeAuthority::MxCreativeDisplayInfo)
+}
+
+#[cfg(any(feature = "mx-creative-hid", test))]
+pub(crate) fn display_route_hid_worker_capability() -> Option<HidWorkerCapability> {
+    hid_capability_for(ScopeAuthority::MxCreativeDisplayRoute)
+}
+
+#[cfg(any(feature = "mx-creative-hid", test))]
+pub(crate) fn firmware_info_hid_worker_capability() -> Option<HidWorkerCapability> {
+    hid_capability_for(ScopeAuthority::MxCreativeFirmwareInfo)
+}
+
+#[cfg(any(feature = "mx-creative-hid", test))]
+pub(crate) fn single_key_paint_hid_worker_capability() -> Option<HidWorkerCapability> {
+    hid_capability_for(ScopeAuthority::MxCreativeSingleKeyPaint)
+}
+
+#[cfg(any(
+    feature = "micro-hid",
+    feature = "akp03-hid",
+    feature = "mx-creative-hid",
+    test
+))]
+fn hid_capability_for(requested_authority: ScopeAuthority) -> Option<HidWorkerCapability> {
     let (authority, scope_nonce) = WORKER_SCOPE.with(Cell::get)?;
     let parent = WATCHDOG_PARENT.with(Cell::get)?;
-    if authority != ScopeAuthority::HidLive
+    if authority != requested_authority
         || verify_containment().is_err()
         || verify_supervisor_parent().is_err()
     {
@@ -119,6 +180,7 @@ pub(crate) fn hid_worker_capability() -> Option<HidWorkerCapability> {
         pid: unsafe { libc::getpid() },
         scope_nonce,
         parent,
+        authority,
         _thread_bound: PhantomData,
     })
 }
@@ -199,6 +261,38 @@ pub(super) fn validate_platform_request(request: &DiagnosticRequest) -> Result<D
             request.kind == "micro_hid_probe",
         )
         .map_err(|_| Kind::InvalidRequest),
+        "mx_creative_evidence" => {
+            let options: crate::devices::mx_creative::probe::Options =
+                serde_json::from_value(request.payload.clone())
+                    .map_err(|_| Kind::InvalidRequest)?;
+            options.validate().map_err(|_| Kind::InvalidRequest)?;
+            Ok(options.budget())
+        }
+        "mx_creative_display_info" => {
+            let options: crate::devices::mx_creative::display_info::Options =
+                serde_json::from_value(request.payload.clone())
+                    .map_err(|_| Kind::InvalidRequest)?;
+            options.validate().map_err(|_| Kind::InvalidRequest)?;
+            Ok(options.budget())
+        }
+        "mx_creative_display_route" if request.payload.is_null() => Ok(Duration::from_secs(8)),
+        "mx_creative_firmware_info" => {
+            let options: crate::devices::mx_creative::firmware_info::Options =
+                serde_json::from_value(request.payload.clone())
+                    .map_err(|_| Kind::InvalidRequest)?;
+            options.validate().map_err(|_| Kind::InvalidRequest)?;
+            Ok(options.budget())
+        }
+        "mx_creative_single_key_paint" if request.payload.is_null() => {
+            Ok(crate::devices::mx_creative::single_key_paint::BUDGET)
+        }
+        "mx_creative_colored_icon_test" => {
+            let options: crate::devices::mx_creative::colored_icon_test::Options =
+                serde_json::from_value(request.payload.clone())
+                    .map_err(|_| Kind::InvalidRequest)?;
+            options.validate();
+            Ok(crate::devices::mx_creative::colored_icon_test::BUDGET)
+        }
         "ct_serial_probe" => {
             let options: crate::devices::ct::probe::Options =
                 serde_json::from_value(request.payload.clone())
@@ -211,6 +305,27 @@ pub(super) fn validate_platform_request(request: &DiagnosticRequest) -> Result<D
             ))
         }
         _ => Err(Kind::UnsupportedPlatform),
+    }
+}
+
+fn request_authority(request: &DiagnosticRequest) -> Result<ScopeAuthority, Kind> {
+    match request.kind.as_str() {
+        "health" => Ok(ScopeAuthority::Health),
+        "ct_serial_probe" => Ok(ScopeAuthority::CtSerialProbe),
+        "mx_creative_evidence" => Ok(ScopeAuthority::HidLive),
+        "mx_creative_display_info" => Ok(ScopeAuthority::MxCreativeDisplayInfo),
+        "mx_creative_display_route" => Ok(ScopeAuthority::MxCreativeDisplayRoute),
+        "mx_creative_firmware_info" => Ok(ScopeAuthority::MxCreativeFirmwareInfo),
+        "mx_creative_single_key_paint" => Ok(ScopeAuthority::MxCreativeSingleKeyPaint),
+        "mx_creative_colored_icon_test" => Ok(ScopeAuthority::MxCreativeSingleKeyPaint),
+        "micro_hid_probe" | "akp03_hid_probe" => {
+            if request.payload["health_check"] == false {
+                Ok(ScopeAuthority::HidLive)
+            } else {
+                Ok(ScopeAuthority::HidHealth)
+            }
+        }
+        _ => Err(Kind::InvalidRequest),
     }
 }
 
@@ -336,6 +451,14 @@ struct ParentWatchdog {
 
 impl ParentWatchdog {
     fn start() -> Result<Self, Kind> {
+        Self::start_with_limit(Some(super::MAX_TIMEOUT))
+    }
+
+    fn start_live() -> Result<Self, Kind> {
+        Self::start_with_limit(None)
+    }
+
+    fn start_with_limit(limit: Option<Duration>) -> Result<Self, Kind> {
         verify_containment()?;
         if WATCHDOG_PARENT.with(Cell::get).is_some() {
             return Err(Kind::Containment);
@@ -350,7 +473,11 @@ impl ParentWatchdog {
             return Err(Kind::Containment);
         }
         let stop = Arc::new(AtomicBool::new(false));
-        let limit_ms = Arc::new(AtomicU64::new(super::MAX_TIMEOUT.as_millis() as u64));
+        let limit_ms = Arc::new(AtomicU64::new(
+            limit
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0),
+        ));
         let (ready, receiver) = mpsc::sync_channel(1);
         let signal = Arc::clone(&stop);
         let limit = Arc::clone(&limit_ms);
@@ -363,9 +490,9 @@ impl ParentWatchdog {
                 }
                 let _ = ready.try_send(());
                 while !signal.load(Ordering::Acquire) {
+                    let budget = limit.load(Ordering::Acquire);
                     if !parent_alive(parent)
-                        || started.elapsed().as_millis()
-                            >= u128::from(limit.load(Ordering::Acquire))
+                        || (budget != 0 && started.elapsed().as_millis() >= u128::from(budget))
                     {
                         terminate_worker_group(pid);
                     }
@@ -388,8 +515,11 @@ impl ParentWatchdog {
     }
 
     fn set_budget(&self, budget: Duration) -> Result<(), Kind> {
-        self.limit_ms
-            .store(budget.as_millis() as u64, Ordering::Release);
+        let milliseconds = budget.as_millis() as u64;
+        if milliseconds == 0 {
+            return Err(Kind::InvalidTimeout);
+        }
+        self.limit_ms.store(milliseconds, Ordering::Release);
         if self.started.elapsed() >= budget {
             return Err(Kind::TimedOut);
         }
@@ -412,9 +542,9 @@ impl Drop for ParentWatchdog {
         // grace that could kill a successfully completed probe under load.
         // The supervisor still enforces any shorter caller deadline.
         while !task.is_finished() {
+            let budget = self.limit_ms.load(Ordering::Acquire);
             if !parent_alive(self.parent)
-                || self.started.elapsed().as_millis()
-                    >= u128::from(self.limit_ms.load(Ordering::Acquire))
+                || (budget != 0 && self.started.elapsed().as_millis() >= u128::from(budget))
             {
                 terminate_worker_group(unsafe { libc::getpid() });
             }
@@ -452,18 +582,7 @@ pub(super) fn worker_main(allowlist: &DiagnosticAllowlist) -> Result<(), WorkerE
         let callback = allowlist
             .find(&envelope.request.kind)
             .ok_or(Kind::InvalidRequest)?;
-        let authority = match envelope.request.kind.as_str() {
-            "health" => ScopeAuthority::Health,
-            "ct_serial_probe" => ScopeAuthority::CtSerialProbe,
-            "micro_hid_probe" | "akp03_hid_probe" => {
-                if envelope.request.payload["health_check"] == false {
-                    ScopeAuthority::HidLive
-                } else {
-                    ScopeAuthority::HidHealth
-                }
-            }
-            _ => return Err(Kind::InvalidRequest),
-        };
+        let authority = request_authority(&envelope.request)?;
         let _scope = WorkerScope::enter(authority)?;
         let outcome = protocol::invoke_callback(callback, envelope.request.payload);
         let frame = protocol::encode_response(&outcome, envelope.request_nonce, worker)?;
@@ -700,6 +819,581 @@ fn drain<T: Read + IntoRawFd>(
         }
     }
     Ok(())
+}
+
+const LIVE_VERSION: u32 = 1;
+const MAX_LIVE_FRAME: usize = 256;
+const LIVE_SETUP: Duration = Duration::from_secs(2);
+const LIVE_READY: Duration = Duration::from_secs(10);
+const LIVE_WRITE: Duration = Duration::from_millis(250);
+const LIVE_PARENT_POLL: Duration = Duration::from_millis(20);
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LiveRequest {
+    version: u32,
+    nonce: Uuid,
+    device: String,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LiveMessage {
+    version: u32,
+    nonce: Uuid,
+    kind: LiveMessageKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action: Option<crate::devices::mx_creative::review_input::Action>,
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LiveMessageKind {
+    Ready,
+    Action,
+}
+
+fn encode_live<T: Serialize>(value: &T) -> Result<Vec<u8>, Kind> {
+    let frame = protocol::encode_frame(value)?;
+    if frame.len() > MAX_LIVE_FRAME + 4 {
+        return Err(Kind::FrameLimit);
+    }
+    Ok(frame)
+}
+
+fn wait_fd(fd: libc::c_int, events: i16, timeout: Duration) -> Result<i16, Kind> {
+    let mut descriptor = libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    };
+    let milliseconds = i32::try_from(timeout.as_millis().max(1)).unwrap_or(i32::MAX);
+    let result = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+    if result < 0 {
+        return if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            Ok(0)
+        } else {
+            Err(Kind::Transport)
+        };
+    }
+    Ok(descriptor.revents)
+}
+
+fn read_exact_live<T: AsRawFd + Read>(
+    reader: &mut T,
+    bytes: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>, Kind> {
+    let mut result = vec![0; bytes];
+    let mut offset = 0;
+    while offset != bytes {
+        match reader.read(&mut result[offset..]) {
+            Ok(0) => return Err(Kind::Transport),
+            Ok(count) => offset += count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                if Instant::now() >= deadline {
+                    return Err(Kind::TimedOut);
+                }
+                let events = wait_fd(
+                    reader.as_raw_fd(),
+                    libc::POLLIN,
+                    deadline.saturating_duration_since(Instant::now()),
+                )?;
+                if events & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                    return Err(Kind::Transport);
+                }
+            }
+            Err(_) => return Err(Kind::Transport),
+        }
+    }
+    Ok(result)
+}
+
+fn control_open(reader: &impl AsRawFd) -> Result<bool, Kind> {
+    let mut descriptor = libc::pollfd {
+        fd: reader.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut descriptor, 1, 0) } < 0 {
+        return Err(Kind::Transport);
+    }
+    if descriptor.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+        return Err(Kind::Transport);
+    }
+    if descriptor.revents & (libc::POLLIN | libc::POLLHUP) == 0 {
+        return Ok(true);
+    }
+    let mut byte = [0; 1];
+    loop {
+        match unsafe {
+            libc::read(
+                reader.as_raw_fd(),
+                byte.as_mut_ptr().cast(),
+                byte.len() as libc::size_t,
+            )
+        } {
+            0 => return Ok(false),
+            1 => return Err(Kind::Protocol),
+            -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
+            -1 if io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock => {
+                return Ok(true);
+            }
+            _ => return Err(Kind::Transport),
+        }
+    }
+}
+
+fn read_live_frame<R: Read + AsRawFd>(reader: &mut R, deadline: Instant) -> Result<Vec<u8>, Kind> {
+    let header = read_exact_live(reader, 4, deadline)?;
+    let length = u32::from_le_bytes(header.try_into().expect("exact header")) as usize;
+    if length == 0 || length > MAX_LIVE_FRAME {
+        return Err(Kind::FrameLimit);
+    }
+    read_exact_live(reader, length, deadline)
+}
+
+fn write_live<T: Write + AsRawFd>(
+    writer: &mut T,
+    bytes: &[u8],
+    deadline: Instant,
+) -> Result<(), Kind> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        match writer.write(&bytes[offset..]) {
+            Ok(0) => return Err(Kind::Transport),
+            Ok(count) => offset += count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                if Instant::now() >= deadline
+                    || wait_fd(
+                        writer.as_raw_fd(),
+                        libc::POLLOUT,
+                        deadline.saturating_duration_since(Instant::now()),
+                    )
+                    .is_err()
+                {
+                    return Err(Kind::Transport);
+                }
+            }
+            Err(_) => return Err(Kind::Transport),
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn mx_creative_review_worker_main() -> Result<(), WorkerError> {
+    let run = || -> Result<(), Kind> {
+        verify_containment()?;
+        let watchdog = ParentWatchdog::start_live()?;
+        let mut stdin = duplicate_pipe(libc::STDIN_FILENO)?;
+        let mut stdout = duplicate_pipe(libc::STDOUT_FILENO)?;
+        let _stderr = duplicate_pipe(libc::STDERR_FILENO)?;
+        make_nonblocking(&stdin, Instant::now() + LIVE_SETUP).map_err(|_| Kind::Transport)?;
+        make_nonblocking(&stdout, Instant::now() + LIVE_SETUP).map_err(|_| Kind::Transport)?;
+        let body = read_live_frame(&mut stdin, Instant::now() + LIVE_SETUP)?;
+        let request: LiveRequest = protocol::decode_frame_body(&body)?;
+        if request.version != LIVE_VERSION
+            || request.nonce.is_nil()
+            || request.device != "mx-creative"
+        {
+            return Err(Kind::InvalidRequest);
+        }
+        let _scope = WorkerScope::enter(ScopeAuthority::MxCreativeReview)?;
+        let backend =
+            crate::native::hid::mx_creative_review_backend().map_err(|_| Kind::Callback)?;
+        let mut devices = crate::devices::mx_creative::probe::LiveDevices::open(backend.as_ref())
+            .map_err(|_| Kind::Callback)?;
+        let mut reducer = crate::devices::mx_creative::review_input::Reducer::default();
+        let arm = Instant::now();
+        while arm.elapsed() < crate::devices::mx_creative::review_input::ARM_DRAIN {
+            if !control_open(&stdin)? || !parent_alive(watchdog.parent) {
+                return Err(Kind::Cancelled);
+            }
+            for role in [
+                crate::devices::mx_creative::probe::Role::Keypad,
+                crate::devices::mx_creative::probe::Role::Dialpad,
+            ] {
+                match devices.read(role, crate::devices::mx_creative::review_input::READ_SLICE) {
+                    Ok(report) => reducer.arm_baseline(role, &report),
+                    Err(crate::native::hid::HidError::Timeout) => {}
+                    Err(_) => return Err(Kind::Callback),
+                }
+            }
+        }
+        let ready = encode_live(&LiveMessage {
+            version: LIVE_VERSION,
+            nonce: request.nonce,
+            kind: LiveMessageKind::Ready,
+            action: None,
+        })?;
+        write_live(&mut stdout, &ready, Instant::now() + LIVE_WRITE)?;
+        let started = Instant::now();
+        loop {
+            if !control_open(&stdin)? || !parent_alive(watchdog.parent) {
+                return Ok(());
+            }
+            for role in [
+                crate::devices::mx_creative::probe::Role::Keypad,
+                crate::devices::mx_creative::probe::Role::Dialpad,
+            ] {
+                let report = match devices
+                    .read(role, crate::devices::mx_creative::review_input::READ_SLICE)
+                {
+                    Ok(report) => report,
+                    Err(crate::native::hid::HidError::Timeout) => continue,
+                    Err(_) => return Err(Kind::Callback),
+                };
+                let Some(action) = reducer.accept(role, &report, started.elapsed()) else {
+                    continue;
+                };
+                let frame = encode_live(&LiveMessage {
+                    version: LIVE_VERSION,
+                    nonce: request.nonce,
+                    kind: LiveMessageKind::Action,
+                    action: Some(action),
+                })?;
+                write_live(&mut stdout, &frame, Instant::now() + LIVE_WRITE)?;
+            }
+        }
+    };
+    run().map_err(WorkerError::before_launch)
+}
+
+#[derive(Default)]
+struct LiveFrameBuffer {
+    bytes: Vec<u8>,
+    started: Option<Instant>,
+}
+
+impl LiveFrameBuffer {
+    fn push(&mut self, bytes: &[u8]) -> Result<(), Kind> {
+        if bytes.len() > MAX_DIAGNOSTIC_BYTES - self.bytes.len() {
+            return Err(Kind::FrameLimit);
+        }
+        if self.bytes.is_empty() && !bytes.is_empty() {
+            self.started = Some(Instant::now());
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn pop(&mut self) -> Result<Option<LiveMessage>, Kind> {
+        if self
+            .started
+            .is_some_and(|started| started.elapsed() > LIVE_WRITE)
+        {
+            return Err(Kind::TimedOut);
+        }
+        if self.bytes.len() < 4 {
+            return Ok(None);
+        }
+        let length = u32::from_le_bytes(self.bytes[..4].try_into().unwrap()) as usize;
+        if length == 0 || length > MAX_LIVE_FRAME {
+            return Err(Kind::FrameLimit);
+        }
+        if self.bytes.len() < length + 4 {
+            return Ok(None);
+        }
+        let message = protocol::decode_frame_body(&self.bytes[4..length + 4])?;
+        self.bytes.drain(..length + 4);
+        if self.bytes.is_empty() {
+            self.started = None;
+        } else {
+            self.started = Some(Instant::now());
+        }
+        Ok(Some(message))
+    }
+
+    fn empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+fn accept_live_message(
+    message: LiveMessage,
+    nonce: Uuid,
+    ready: &mut bool,
+    output: &mut OutputGate,
+) -> Result<(), Kind> {
+    if message.version != LIVE_VERSION || message.nonce != nonce {
+        return Err(Kind::Protocol);
+    }
+    match (message.kind, message.action) {
+        (LiveMessageKind::Ready, None) if !*ready => {
+            *ready = true;
+            Ok(())
+        }
+        (LiveMessageKind::Action, Some(action)) if *ready => output.enqueue(action, Instant::now()),
+        _ => Err(Kind::Protocol),
+    }
+}
+
+struct OutputGate {
+    pending: Vec<u8>,
+    since: Option<Instant>,
+}
+
+impl OutputGate {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            since: None,
+        }
+    }
+
+    fn enqueue(
+        &mut self,
+        action: crate::devices::mx_creative::review_input::Action,
+        now: Instant,
+    ) -> Result<(), Kind> {
+        if !self.pending.is_empty() {
+            return Err(Kind::Transport);
+        }
+        self.pending
+            .extend_from_slice(action.json_line().as_bytes());
+        self.since = Some(now);
+        Ok(())
+    }
+
+    fn flush<W: Write>(&mut self, writer: &mut W, now: Instant) -> Result<(), Kind> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        if self
+            .since
+            .is_some_and(|since| now.saturating_duration_since(since) > LIVE_WRITE)
+        {
+            return Err(Kind::Transport);
+        }
+        match writer.write(&self.pending) {
+            Ok(0) => Err(Kind::Transport),
+            Ok(count) => {
+                self.pending.drain(..count);
+                if self.pending.is_empty() {
+                    self.since = None;
+                }
+                Ok(())
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(())
+            }
+            Err(_) => Err(Kind::Transport),
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+}
+
+fn accept_parent_input(read: io::Result<usize>) -> Result<bool, Kind> {
+    match read {
+        Ok(0) => Ok(false),
+        Ok(_) => Err(Kind::Protocol),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(true)
+        }
+        Err(_) => Err(Kind::Transport),
+    }
+}
+
+pub(super) fn supervise_mx_creative_review() -> Result<(), WorkerError> {
+    let _active = SUPERVISOR.acquire().map_err(WorkerError::before_launch)?;
+    if crate::native::portable::child::cleanup_blocked() {
+        SUPERVISOR.block();
+        return Err(WorkerError::before_launch(Kind::SupervisionBlocked));
+    }
+    let executable =
+        std::env::current_exe().map_err(|_| WorkerError::before_launch(Kind::Spawn))?;
+    let mut command = Command::new(executable);
+    command
+        .arg(super::MX_CREATIVE_REVIEW_HIDDEN_WORKER_ARGUMENT)
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command
+        .spawn()
+        .map_err(|_| WorkerError::before_launch(Kind::Spawn))?;
+    let pid = child.id() as libc::pid_t;
+    let mut child = GroupGuard::new(child, pid);
+    let mut pipes = Pipes {
+        stdin: child.child.stdin.take(),
+        stdout: child.child.stdout.take(),
+        stderr: child.child.stderr.take(),
+    };
+    let mut worker = None;
+    let run = (|| {
+        if pid <= 0 || unsafe { libc::getpgid(pid) } != pid {
+            return Err(Kind::Containment);
+        }
+        let retained = identity(pid)?;
+        worker = Some(retained);
+        let deadline = Instant::now() + LIVE_SETUP;
+        let public_in = std::io::stdin();
+        let public_out = std::io::stdout();
+        let mut public_in = public_in.lock();
+        let mut public_out = public_out.lock();
+        for handle in [
+            pipes.stdin.as_ref().map(|pipe| pipe.as_raw_fd()),
+            pipes.stdout.as_ref().map(|pipe| pipe.as_raw_fd()),
+            pipes.stderr.as_ref().map(|pipe| pipe.as_raw_fd()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let flags = unsafe { libc::fcntl(handle, libc::F_GETFL) };
+            if flags < 0
+                || unsafe { libc::fcntl(handle, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                return Err(Kind::Transport);
+            }
+        }
+        for handle in [public_in.as_raw_fd(), public_out.as_raw_fd()] {
+            let flags = unsafe { libc::fcntl(handle, libc::F_GETFL) };
+            if flags < 0
+                || unsafe { libc::fcntl(handle, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                return Err(Kind::Transport);
+            }
+        }
+        let nonce = Uuid::new_v4();
+        let request = encode_live(&LiveRequest {
+            version: LIVE_VERSION,
+            nonce,
+            device: "mx-creative".into(),
+        })?;
+        let mut sent = 0;
+        let ready_deadline = Instant::now() + LIVE_READY;
+        let mut frames = LiveFrameBuffer::default();
+        let mut ready = false;
+        let mut output = OutputGate::new();
+        let mut diagnostics = 0;
+        loop {
+            let mut external = libc::pollfd {
+                fd: public_in.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&raw mut external, 1, 0) } < 0 {
+                return Err(Kind::Transport);
+            }
+            if external.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+                let mut one = [0; 1];
+                if !accept_parent_input(public_in.read(&mut one))? {
+                    return Ok(());
+                }
+            }
+            if !ready && Instant::now() >= ready_deadline {
+                return Err(Kind::TimedOut);
+            }
+            if sent < request.len() {
+                match pipes
+                    .stdin
+                    .as_mut()
+                    .ok_or(Kind::Transport)?
+                    .write(&request[sent..])
+                {
+                    Ok(0) => return Err(Kind::Transport),
+                    Ok(count) => sent += count,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(_) => return Err(Kind::Transport),
+                }
+                if sent < request.len() && Instant::now() >= deadline {
+                    return Err(Kind::TimedOut);
+                }
+            }
+            if output.is_pending() {
+                output.flush(&mut public_out, Instant::now())?;
+            }
+            if !output.is_pending() {
+                if !frames.empty()
+                    && let Some(message) = frames.pop()?
+                {
+                    accept_live_message(message, nonce, &mut ready, &mut output)?;
+                    continue;
+                }
+                let mut buffer = [0; 512];
+                if let Some(stdout) = &mut pipes.stdout {
+                    loop {
+                        match stdout.read(&mut buffer) {
+                            Ok(0) => return Err(Kind::Transport),
+                            Ok(count) => {
+                                frames.push(&buffer[..count])?;
+                                if let Some(message) = frames.pop()? {
+                                    accept_live_message(message, nonce, &mut ready, &mut output)?;
+                                }
+                                break;
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                            Err(_) => return Err(Kind::Transport),
+                        }
+                    }
+                }
+            }
+            let mut buffer = [0; 512];
+            if let Some(stderr) = &mut pipes.stderr {
+                loop {
+                    match stderr.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(count) => {
+                            if count > MAX_DIAGNOSTIC_BYTES - diagnostics {
+                                return Err(Kind::DiagnosticLimit);
+                            }
+                            diagnostics += count;
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(_) => return Err(Kind::Transport),
+                    }
+                }
+            }
+            if peek_exited(pid, Instant::now() + LIVE_PARENT_POLL).map_err(|_| Kind::Containment)? {
+                return Err(Kind::WorkerFailed);
+            }
+            thread::sleep(LIVE_PARENT_POLL);
+        }
+    })();
+    let exited = child.finish();
+    let io_closed = pipes.close();
+    if exited.is_err() || !io_closed {
+        SUPERVISOR.block();
+        return Err(WorkerError::after_launch(
+            Kind::CleanupUnconfirmed,
+            worker,
+            exited.is_ok(),
+            io_closed,
+        ));
+    }
+    match run {
+        Ok(()) => Ok(()),
+        Err(kind) => Err(WorkerError::after_launch(kind, worker, true, true)),
+    }
 }
 
 #[cfg(test)]

@@ -57,12 +57,26 @@ impl HidWorkerCapability {
         }
     }
 
-    #[cfg(all(windows, any(feature = "micro-hid", feature = "akp03-hid")))]
+    #[cfg(all(
+        windows,
+        any(
+            feature = "micro-hid",
+            feature = "akp03-hid",
+            feature = "mx-creative-hid"
+        )
+    ))]
     pub(crate) fn authorize(&self) -> Result<(), HidError> {
         self.authorize_with(super::windows::verify_hid_containment)
     }
 
-    #[cfg(all(windows, any(feature = "micro-hid", feature = "akp03-hid")))]
+    #[cfg(all(
+        windows,
+        any(
+            feature = "micro-hid",
+            feature = "akp03-hid",
+            feature = "mx-creative-hid"
+        )
+    ))]
     pub(crate) fn valid(&self) -> bool {
         self.authorize().is_ok()
     }
@@ -82,7 +96,14 @@ fn capability_with(verify_containment: impl FnOnce() -> bool) -> Option<HidWorke
     Some(capability)
 }
 
-#[cfg(all(windows, any(feature = "micro-hid", feature = "akp03-hid")))]
+#[cfg(all(
+    windows,
+    any(
+        feature = "micro-hid",
+        feature = "akp03-hid",
+        feature = "mx-creative-hid"
+    )
+))]
 pub(crate) fn hid_worker_capability() -> Option<HidWorkerCapability> {
     capability_with(super::windows::verify_hid_containment)
 }

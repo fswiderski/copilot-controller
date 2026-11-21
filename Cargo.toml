@@ -19,6 +19,7 @@ default = []
 # macOS ARM64); other targets report typed unavailability. No updater backend.
 akp03-hid = []
 micro-hid = []
+mx-creative-hid = []
 # Offline pinned-artifact validation must not implicitly enable native HID.
 micro-firmware = []
 
@@ -53,6 +54,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
 ryu = "1"
 jpeg-encoder = "0.6"
+png = "0.17"
 
 [dev-dependencies]
 jpeg-decoder = "0.3"

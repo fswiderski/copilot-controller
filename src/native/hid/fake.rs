@@ -21,6 +21,8 @@ pub struct FakeState {
     pub writes_unsupported: bool,
     pub report_descriptor: Option<Vec<u8>>,
     pub exclusive_open_result: Option<ExclusiveOpenProbe>,
+    pub route_open_result: Option<OutputRouteOpenProof>,
+    pub route_open_calls: usize,
 }
 
 pub struct FakeBackend {
@@ -58,6 +60,17 @@ impl HidBackend for FakeBackend {
         Ok(Box::new(FakeTransport(self.state.clone())))
     }
 
+    fn open_filtered(
+        &self,
+        d: &HidDescriptor,
+        reports: &[(u8, usize)],
+    ) -> Result<Box<dyn HidTransport>, HidError> {
+        if reports.is_empty() || reports.iter().any(|(_, length)| *length == 0) {
+            return Err(HidError::Protocol("invalid fake report filter"));
+        }
+        self.open(d)
+    }
+
     fn original_report_descriptor(&self, d: &HidDescriptor) -> Result<Vec<u8>, HidError> {
         let mut state = self.state.borrow_mut();
         state.descriptor_calls += 1;
@@ -83,6 +96,17 @@ impl HidBackend for FakeBackend {
             UnavailableReason::UnsupportedPlatform,
         ))
     }
+
+    fn open_route_probe(&self, d: &HidDescriptor) -> Result<OutputRouteOpenProof, HidError> {
+        let state = &mut *self.state.borrow_mut();
+        state.route_open_calls += 1;
+        if !self.devices.contains(d) {
+            return Err(HidError::NotFound);
+        }
+        state.route_open_result.clone().ok_or(HidError::Unavailable(
+            UnavailableReason::UnsupportedPlatform,
+        ))
+    }
 }
 
 struct FakeTransport(Rc<RefCell<FakeState>>);
@@ -96,6 +120,17 @@ impl HidTransport for FakeTransport {
         let mut s = self.0.borrow_mut();
         s.written.push(report.to_vec());
         Ok(s.write_count.unwrap_or(report.len()))
+    }
+
+    fn write_mx_creative_display_report(&mut self, report: &[u8]) -> Result<usize, HidError> {
+        if report.len() != MX_CREATIVE_DISPLAY_REPORT_LEN
+            || report.first().copied() != Some(MX_CREATIVE_DISPLAY_REPORT_ID)
+        {
+            return Err(HidError::InvalidArgument(
+                ArgumentError::ReportExceedsDevice,
+            ));
+        }
+        self.write(report)
     }
 
     fn read(&mut self, buf: &mut [u8], _t: Duration) -> Result<usize, HidError> {

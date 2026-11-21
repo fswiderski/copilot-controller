@@ -3,6 +3,13 @@
 
 mod ct_probe;
 mod hid_probe;
+mod mx_creative_colored_icon_test;
+mod mx_creative_display_info;
+mod mx_creative_display_route;
+mod mx_creative_evidence;
+mod mx_creative_firmware_info;
+mod mx_creative_single_key_paint;
+mod review_input;
 
 use std::{
     io::Read,
@@ -15,7 +22,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
-    devices::{akp03, firmware, micro},
+    devices::{akp03, firmware, micro, mx_creative},
     native::{
         portable::{clock::sample_monotonic, inventory::portable_inventory},
         windows_observation as observation, windows_worker as worker,
@@ -60,6 +67,18 @@ Usage: copilot-controller <command>
            [--io-timeout-ms <100..1500>] [--capture-ms <0..5000>]
            [--max-events <1..128>] [--max-received-bytes <256..32768>]
            [--test-pattern] (explicit contained serial diagnostic)
+  mx-creative-evidence [--capture-ms <0..30000>] (finite read-only HID evidence)
+  mx-creative-display-info [--hold-keepalive-ms 1000]
+           (default metadata-only; explicit fixed volatile GET/hold check)
+  mx-creative-display-route
+           (no-paint output-route proof; no report or image is sent)
+  mx-creative-firmware-info
+           (bounded read-only HID++ firmware metadata; no options)
+  mx-creative-single-key-paint --confirm-rainbow-nine-keys
+           (keys 1..9 sequential volatile rainbow paint, one key at a time)
+  mx-creative-colored-icon-test --confirm-colored-icon <play-pause|first-frame|last-frame|back-1s|forward-1s|screenshot|dictate>
+           (paint one mapped original fesReview icon; volatile KeepAlive rollback)
+  review-input --device mx-creative (private foreground action stream)
 
 All previews and probes are not ready or hardware-qualified. Native probes use
 contained Windows workers or macOS ARM64 workers.
@@ -114,6 +133,13 @@ pub enum Command {
     CtProbe(crate::devices::ct::probe::Options),
     MicroProbe(micro::probe::MicroProbeOptions),
     Akp03Probe(akp03::probe::Akp03ProbeOptions),
+    MxCreativeEvidence(mx_creative::probe::Options),
+    MxCreativeDisplayInfo(mx_creative::display_info::Options),
+    MxCreativeDisplayRoute,
+    MxCreativeFirmwareInfo(mx_creative::firmware_info::Options),
+    MxCreativeSingleKeyPaint,
+    MxCreativeColoredIconTest(mx_creative::colored_icon_test::Options),
+    ReviewInput,
     FirmwarePlan {
         image: PathBuf,
         tool: PathBuf,
@@ -267,6 +293,28 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "device-assign" => return assignment(args),
         "micro-decode" => return micro_reports(args),
         "ct-probe" => return ct_probe::parse(args).map(Command::CtProbe),
+        "mx-creative-evidence" => {
+            return mx_creative_evidence::parse(args).map(Command::MxCreativeEvidence);
+        }
+        "mx-creative-display-info" => {
+            return mx_creative_display_info::parse(args).map(Command::MxCreativeDisplayInfo);
+        }
+        "mx-creative-display-route" => {
+            return mx_creative_display_route::parse(args)
+                .map(|()| Command::MxCreativeDisplayRoute);
+        }
+        "mx-creative-firmware-info" => {
+            return mx_creative_firmware_info::parse(args).map(Command::MxCreativeFirmwareInfo);
+        }
+        "mx-creative-single-key-paint" => {
+            return mx_creative_single_key_paint::parse(args)
+                .map(|()| Command::MxCreativeSingleKeyPaint);
+        }
+        "mx-creative-colored-icon-test" => {
+            return mx_creative_colored_icon_test::parse(args)
+                .map(Command::MxCreativeColoredIconTest);
+        }
+        "review-input" => return review_input::parse(args).map(|()| Command::ReviewInput),
         "micro-probe" | "akp03-probe" => {
             return hid_probe::parse(args, name == "micro-probe").map(|options| match options {
                 hid_probe::Options::Micro(options) => Command::MicroProbe(options),
@@ -388,10 +436,16 @@ fn capabilities() -> Value {
         "qualification": "foundation_only",
         "inventory": portable_inventory(),
         "offline_codecs": ["micro", "akp03-original", "akp03e-rev2", "ct-pid-0003"],
-        "hardware_backend_available": ct_serial_probe_available || cfg!(all(target_os = "macos", target_arch = "aarch64", any(feature = "micro-hid", feature = "akp03-hid"))),
+        "hardware_backend_available": ct_serial_probe_available || cfg!(all(target_os = "macos", target_arch = "aarch64", any(feature = "micro-hid", feature = "akp03-hid", feature = "mx-creative-hid"))),
         "ct_serial_probe_available": ct_serial_probe_available,
         "micro_hid_probe_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "micro-hid")),
         "akp03_hid_probe_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "akp03-hid")),
+        "mx_creative_evidence_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
+        "mx_creative_display_info_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
+        "mx_creative_display_route_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
+        "mx_creative_firmware_info_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
+        "mx_creative_single_key_paint_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
+        "mx_creative_colored_icon_test_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "mx-creative-hid")),
         "firmware_execution_available": false,
         "runtime_owner_acquired": false,
         "state_store_api_available": cfg!(any(target_os = "linux", target_os = "macos")),
@@ -399,6 +453,7 @@ fn capabilities() -> Value {
         "build_features": {
             "akp03_hid": cfg!(feature = "akp03-hid"),
             "micro_hid": cfg!(feature = "micro-hid"),
+            "mx_creative_hid": cfg!(feature = "mx-creative-hid"),
             "micro_firmware": cfg!(feature = "micro-firmware"),
         },
         "limitations": ["Availability is compile-time support, not native evidence or hardware acceptance. Native CLI probing requires explicit opt-in and a contained Windows or macOS ARM64 worker.",
@@ -573,6 +628,15 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
         Command::CtProbe(options) => ct_probe::execute(options),
         Command::MicroProbe(options) => hid_probe::execute(hid_probe::Options::Micro(options)),
         Command::Akp03Probe(options) => hid_probe::execute(hid_probe::Options::Akp03(options)),
+        Command::MxCreativeEvidence(options) => mx_creative_evidence::execute(options),
+        Command::MxCreativeDisplayInfo(options) => mx_creative_display_info::execute(options),
+        Command::MxCreativeDisplayRoute => mx_creative_display_route::execute(),
+        Command::MxCreativeFirmwareInfo(options) => mx_creative_firmware_info::execute(options),
+        Command::MxCreativeSingleKeyPaint => mx_creative_single_key_paint::execute(),
+        Command::MxCreativeColoredIconTest(options) => {
+            mx_creative_colored_icon_test::execute(options)
+        }
+        Command::ReviewInput => Err("review-input requires the streaming CLI route".into()),
         Command::FirmwarePlan { image, tool } => {
             if !cfg!(feature = "micro-firmware") {
                 return Err(
@@ -589,6 +653,17 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
     }
 }
 
+pub fn execute_review_input() -> Result<(), String> {
+    if !cfg!(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        feature = "mx-creative-hid"
+    )) {
+        return Err("review-input requires the mx-creative-hid feature on macOS ARM64".into());
+    }
+    worker::supervise_mx_creative_review().map_err(|error| error.to_string())
+}
+
 static HEALTH_CALLBACKS: [worker::DiagnosticCallback; 1] =
     [worker::DiagnosticCallback::new("health", health_callback)];
 
@@ -601,6 +676,40 @@ static AKP03_CALLBACKS: [worker::DiagnosticCallback; 1] = [worker::DiagnosticCal
     hid_probe::AKP03_KIND,
     hid_probe::akp03_callback,
 )];
+
+static MX_CREATIVE_CALLBACKS: [worker::DiagnosticCallback; 1] = [worker::DiagnosticCallback::new(
+    mx_creative_evidence::KIND,
+    mx_creative_evidence::callback,
+)];
+
+static MX_CREATIVE_DISPLAY_INFO_CALLBACKS: [worker::DiagnosticCallback; 1] =
+    [worker::DiagnosticCallback::new(
+        mx_creative_display_info::KIND,
+        mx_creative_display_info::callback,
+    )];
+
+static MX_CREATIVE_DISPLAY_ROUTE_CALLBACKS: [worker::DiagnosticCallback; 1] =
+    [worker::DiagnosticCallback::new(
+        mx_creative_display_route::KIND,
+        mx_creative_display_route::callback,
+    )];
+
+static MX_CREATIVE_FIRMWARE_INFO_CALLBACKS: [worker::DiagnosticCallback; 1] =
+    [worker::DiagnosticCallback::new(
+        mx_creative_firmware_info::KIND,
+        mx_creative_firmware_info::callback,
+    )];
+
+static MX_CREATIVE_KEYPAD_PAINT_CALLBACKS: [worker::DiagnosticCallback; 2] = [
+    worker::DiagnosticCallback::new(
+        mx_creative_single_key_paint::KIND,
+        mx_creative_single_key_paint::callback,
+    ),
+    worker::DiagnosticCallback::new(
+        mx_creative_colored_icon_test::KIND,
+        mx_creative_colored_icon_test::callback,
+    ),
+];
 
 static DIAGNOSTIC_CALLBACKS: [worker::DiagnosticCallback; 4] = [
     worker::DiagnosticCallback::new("health", health_callback),
@@ -629,6 +738,46 @@ pub fn akp03_probe_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
     worker::DiagnosticAllowlist::new_for_route(
         &AKP03_CALLBACKS,
         worker::DiagnosticWorkerRoute::Akp03,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn mx_creative_evidence_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
+    worker::DiagnosticAllowlist::new_for_route(
+        &MX_CREATIVE_CALLBACKS,
+        worker::DiagnosticWorkerRoute::MxCreative,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn mx_creative_display_info_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
+    worker::DiagnosticAllowlist::new_for_route(
+        &MX_CREATIVE_DISPLAY_INFO_CALLBACKS,
+        worker::DiagnosticWorkerRoute::MxCreativeDisplayInfo,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn mx_creative_display_route_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
+    worker::DiagnosticAllowlist::new_for_route(
+        &MX_CREATIVE_DISPLAY_ROUTE_CALLBACKS,
+        worker::DiagnosticWorkerRoute::MxCreativeDisplayRoute,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn mx_creative_firmware_info_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
+    worker::DiagnosticAllowlist::new_for_route(
+        &MX_CREATIVE_FIRMWARE_INFO_CALLBACKS,
+        worker::DiagnosticWorkerRoute::MxCreativeFirmwareInfo,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn mx_creative_single_key_paint_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
+    worker::DiagnosticAllowlist::new_for_route(
+        &MX_CREATIVE_KEYPAD_PAINT_CALLBACKS,
+        worker::DiagnosticWorkerRoute::MxCreativeSingleKeyPaint,
     )
     .map_err(|error| error.to_string())
 }
@@ -692,6 +841,13 @@ fn health_callback(payload: Value) -> Result<Value, worker::DiagnosticCallbackEr
 
 #[cfg(any(
     all(target_os = "macos", target_arch = "aarch64"),
-    all(windows, any(feature = "micro-hid", feature = "akp03-hid"))
+    all(
+        windows,
+        any(
+            feature = "micro-hid",
+            feature = "akp03-hid",
+            feature = "mx-creative-hid"
+        )
+    )
 ))]
 pub(crate) use hid_probe::validate_worker_options;
