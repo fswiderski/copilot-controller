@@ -41,8 +41,8 @@ const FRAME_SEQUENCE: u8 = 0xe0;
 const DISPLAY_COLLECTION_MARKER_HEX: &str = "0643ff0a101aa101851496fe0f7508150026ff000910920201";
 const ASK_USER_ACCEPT_PHRASE: &str = "READY_COLORED_ICON";
 const SOURCE_REPOSITORY: &str = "fes/fesReview-mx-icons";
-const SOURCE_COMMIT: &str = "7a339c9";
-const SOURCE_SVG_ROOT: &str = "assets/mx-keypad-icons";
+const SOURCE_COMMIT: &str = "2823c8c31b02caba0f08fe4c88a8afb251f0f8ab";
+const SOURCE_ASSET_ROOT: &str = "assets/mx-keypad-icons/reference";
 const SOURCE_PNG_DIMENSION: usize = 480;
 const ICON_JPEG_QUALITY: u8 = 75;
 
@@ -141,7 +141,7 @@ pub struct KeepAliveEvidence {
 pub struct IconEvidence {
     pub key_index: u8,
     pub name: String,
-    pub source_svg_path: String,
+    pub source_asset_path: String,
     pub source_png_sha256: String,
     pub jpeg_len: usize,
     pub jpeg_sha256: String,
@@ -162,7 +162,7 @@ pub struct PaintEvidence {
     pub untouched_keys: Vec<u8>,
     pub source_repository: String,
     pub source_commit: String,
-    pub source_svg_root: String,
+    pub source_asset_root: String,
     pub icons: Vec<IconEvidence>,
     pub total_frames_expected: u16,
     pub total_frames_sent: u16,
@@ -242,7 +242,7 @@ impl ParentReadinessForm {
 struct IconFrame {
     key_index: u8,
     name: &'static str,
-    source_svg_path: &'static str,
+    source_asset_path: &'static str,
     source_png_sha256: String,
     jpeg: Vec<u8>,
     jpeg_sha256: String,
@@ -255,14 +255,14 @@ struct IconSource {
     icon: IconName,
     key_index: u8,
     name: &'static str,
-    source_svg_path: &'static str,
+    source_asset_path: &'static str,
     png: &'static [u8],
 }
 
 pub(crate) fn expected_icon_specs() -> Vec<(u8, &'static str, &'static str)> {
     icon_sources()
         .iter()
-        .map(|source| (source.key_index, source.name, source.source_svg_path))
+        .map(|source| (source.key_index, source.name, source.source_asset_path))
         .collect()
 }
 
@@ -302,11 +302,11 @@ fn run_with_sleep(
         untouched_keys,
         source_repository: SOURCE_REPOSITORY.into(),
         source_commit: SOURCE_COMMIT.into(),
-        source_svg_root: SOURCE_SVG_ROOT.into(),
+        source_asset_root: SOURCE_ASSET_ROOT.into(),
         icons: vec![IconEvidence {
             key_index: icon.key_index,
             name: icon.name.into(),
-            source_svg_path: icon.source_svg_path.into(),
+            source_asset_path: icon.source_asset_path.into(),
             source_png_sha256: icon.source_png_sha256.clone(),
             jpeg_len: icon.jpeg.len(),
             jpeg_sha256: icon.jpeg_sha256.clone(),
@@ -620,7 +620,7 @@ fn icon_sources() -> [IconSource; 7] {
             icon: IconName::PlayPause,
             key_index: 1,
             name: "play-pause",
-            source_svg_path: "play-pause.svg",
+            source_asset_path: "play-pause.png",
             png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/play-pause.png"
@@ -630,7 +630,7 @@ fn icon_sources() -> [IconSource; 7] {
             icon: IconName::FirstFrame,
             key_index: 2,
             name: "first-frame",
-            source_svg_path: "first-frame.svg",
+            source_asset_path: "first-frame.png",
             png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/first-frame.png"
@@ -640,7 +640,7 @@ fn icon_sources() -> [IconSource; 7] {
             icon: IconName::LastFrame,
             key_index: 3,
             name: "last-frame",
-            source_svg_path: "last-frame.svg",
+            source_asset_path: "last-frame.png",
             png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/last-frame.png"
@@ -650,7 +650,7 @@ fn icon_sources() -> [IconSource; 7] {
             icon: IconName::Back1s,
             key_index: 4,
             name: "back-1s",
-            source_svg_path: "back-1s.svg",
+            source_asset_path: "back-1s.png",
             png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/back-1s.png"
@@ -660,7 +660,7 @@ fn icon_sources() -> [IconSource; 7] {
             icon: IconName::Forward1s,
             key_index: 5,
             name: "forward-1s",
-            source_svg_path: "forward-1s.svg",
+            source_asset_path: "forward-1s.png",
             png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/forward-1s.png"
@@ -670,7 +670,7 @@ fn icon_sources() -> [IconSource; 7] {
             icon: IconName::Screenshot,
             key_index: 6,
             name: "screenshot",
-            source_svg_path: "screenshot.svg",
+            source_asset_path: "screenshot.png",
             png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/screenshot.png"
@@ -680,7 +680,7 @@ fn icon_sources() -> [IconSource; 7] {
             icon: IconName::Dictate,
             key_index: 7,
             name: "dictate",
-            source_svg_path: "dictate.svg",
+            source_asset_path: "dictate.png",
             png: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/mx-keypad-icons-png/dictate.png"
@@ -726,7 +726,7 @@ fn icon_frame(icon: IconName) -> std::result::Result<IconFrame, String> {
     Ok(IconFrame {
         key_index: source.key_index,
         name: source.name,
-        source_svg_path: source.source_svg_path,
+        source_asset_path: source.source_asset_path,
         source_png_sha256: report_descriptor_sha256(source.png),
         jpeg_sha256: report_descriptor_sha256(&jpeg),
         jpeg,
