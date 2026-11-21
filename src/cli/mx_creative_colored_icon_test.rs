@@ -161,9 +161,10 @@ pub(super) fn valid_result(result: &Result) -> bool {
         let Some(icon) = paint.icons.first() else {
             return false;
         };
-        let Some((expected_key, _expected_name, expected_source_asset_path)) = expected_icon_specs()
-            .into_iter()
-            .find(|(_, expected_name, _)| *expected_name == icon.name)
+        let Some((expected_key, _expected_name, expected_source_asset_path)) =
+            expected_icon_specs()
+                .into_iter()
+                .find(|(_, expected_name, _)| *expected_name == icon.name)
         else {
             return false;
         };
